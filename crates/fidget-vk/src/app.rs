@@ -201,7 +201,7 @@ impl ApplicationHandler for App {
                 self.renderer = Some(renderer);
                 self.window = Some(window);
                 self.last_frame = Instant::now();
-                log::info!("Fidget-VK is running. Drag the ball; keys: R=reset, G=gravity, Esc=quit");
+                log::info!("Fidget-VK is running. Drag the ball; keys: N=fling, R=reset, G=gravity, Esc=quit");
             }
             Err(e) => {
                 log::error!("failed to initialise renderer: {e}");
@@ -251,6 +251,7 @@ impl ApplicationHandler for App {
                             self.world.reset();
                         }
                         PhysicalKey::Code(KeyCode::KeyG) => self.world.toggle_gravity(),
+                        PhysicalKey::Code(KeyCode::KeyN) => self.world.nudge(2800.0),
                         _ => {}
                     }
                 }

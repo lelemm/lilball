@@ -63,6 +63,7 @@ pub struct World {
     accumulator: f32,
     cursor: Vec2,
     mote_accum: f32,
+    nudge_seed: u32,
 }
 
 impl World {
@@ -80,7 +81,21 @@ impl World {
             interaction: InteractionState::default(),
             accumulator: 0.0,
             mote_accum: 0.0,
+            nudge_seed: 0x9E37_79B9,
         }
+    }
+
+    /// Launch the ball in a pseudo-random direction at `speed` px/s. Handy as
+    /// a "fling" hotkey and as the optional random-nudge wake behaviour.
+    pub fn nudge(&mut self, speed: f32) {
+        self.nudge_seed = self
+            .nudge_seed
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        let angle = (self.nudge_seed >> 8) as f32 / (1u32 << 24) as f32
+            * std::f32::consts::TAU;
+        self.ball.vel = Vec2::new(angle.cos(), angle.sin()) * speed;
+        self.ball.wake();
     }
 
     pub fn set_bounds(&mut self, bounds: Bounds) {

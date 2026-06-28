@@ -144,6 +144,14 @@ fn trail_records_and_fades() {
 }
 
 #[test]
+fn nudge_launches_ball_at_speed() {
+    let mut world = no_gravity_world();
+    world.nudge(2800.0);
+    assert_relative_eq!(world.ball.speed(), 2800.0, epsilon = 1.0);
+    assert!(!world.ball.asleep);
+}
+
+#[test]
 fn ball_sleeps_when_still_without_gravity() {
     let mut world = no_gravity_world();
     world.ball.vel = Vec2::ZERO;
