@@ -60,7 +60,7 @@ impl SpringState {
         let dir = delta / len;
         let stretch = len - self.rest_length;
         let radial_speed = ball.vel.dot(dir);
-        let mut force = (self.stiffness * stretch - self.damping * radial_speed) * dir;
+        let mut force = (-self.stiffness * stretch - self.damping * radial_speed) * dir;
         let mag = force.length();
         if mag > self.max_force {
             force *= self.max_force / mag;
