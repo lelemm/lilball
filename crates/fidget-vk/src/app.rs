@@ -264,35 +264,65 @@ impl App {
                 });
                 ui.separator();
 
-                let mut gravity = self.world.gravity_strength();
-                if ui
-                    .add(egui::Slider::new(&mut gravity, 0.0..=2400.0).text("gravity"))
-                    .changed()
-                {
+                let old_gravity = self.world.gravity_strength();
+                let mut gravity = old_gravity;
+                ui.horizontal(|ui| {
+                    if ui.button("-").clicked() {
+                        gravity -= 150.0;
+                    }
+                    ui.add(egui::Slider::new(&mut gravity, 0.0..=2400.0).text("gravity"));
+                    if ui.button("+").clicked() {
+                        gravity += 150.0;
+                    }
+                });
+                if (gravity - old_gravity).abs() > f32::EPSILON {
                     self.world.set_gravity_strength(gravity);
                 }
 
-                let mut stiffness = self.world.spring_stiffness();
-                if ui
-                    .add(egui::Slider::new(&mut stiffness, 15.0..=420.0).text("string elasticity"))
-                    .changed()
-                {
+                let old_stiffness = self.world.spring_stiffness();
+                let mut stiffness = old_stiffness;
+                ui.horizontal(|ui| {
+                    if ui.button("soft").clicked() {
+                        stiffness -= 25.0;
+                    }
+                    ui.add(
+                        egui::Slider::new(&mut stiffness, 15.0..=420.0).text("string elasticity"),
+                    );
+                    if ui.button("stiff").clicked() {
+                        stiffness += 25.0;
+                    }
+                });
+                if (stiffness - old_stiffness).abs() > f32::EPSILON {
                     self.world.set_spring_stiffness(stiffness);
                 }
 
-                let mut damping = self.world.spring_damping();
-                if ui
-                    .add(egui::Slider::new(&mut damping, 2.0..=90.0).text("string damping"))
-                    .changed()
-                {
+                let old_damping = self.world.spring_damping();
+                let mut damping = old_damping;
+                ui.horizontal(|ui| {
+                    if ui.button("-").clicked() {
+                        damping -= 6.0;
+                    }
+                    ui.add(egui::Slider::new(&mut damping, 2.0..=90.0).text("string damping"));
+                    if ui.button("+").clicked() {
+                        damping += 6.0;
+                    }
+                });
+                if (damping - old_damping).abs() > f32::EPSILON {
                     self.world.set_spring_damping(damping);
                 }
 
-                let mut hook = self.world.hook_offset_y();
-                if ui
-                    .add(egui::Slider::new(&mut hook, -600.0..=260.0).text("hook y offset"))
-                    .changed()
-                {
+                let old_hook = self.world.hook_offset_y();
+                let mut hook = old_hook;
+                ui.horizontal(|ui| {
+                    if ui.button("up").clicked() {
+                        hook -= 60.0;
+                    }
+                    ui.add(egui::Slider::new(&mut hook, -600.0..=260.0).text("hook y offset"));
+                    if ui.button("down").clicked() {
+                        hook += 60.0;
+                    }
+                });
+                if (hook - old_hook).abs() > f32::EPSILON {
                     self.world.set_hook_offset_y(hook);
                 }
                 ui.small("Negative hook offset places the string hook above the desktop.");
