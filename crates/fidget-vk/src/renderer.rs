@@ -106,10 +106,8 @@ impl Renderer {
         };
 
         // --- Physical device + queue family --------------------------------
-        let (physical_device, queue_family) =
-            pick_device(&instance, &surface_loader, surface)?;
-        let mem_props =
-            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let (physical_device, queue_family) = pick_device(&instance, &surface_loader, surface)?;
+        let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
         let device_name = unsafe {
             let props = instance.get_physical_device_properties(physical_device);
@@ -239,7 +237,7 @@ impl Renderer {
             render_finished,
             in_flight,
             current_frame: 0,
-            clear_color: [0.02, 0.03, 0.06, 1.0],
+            clear_color: [0.0, 0.0, 0.0, 0.0],
         })
     }
 
@@ -255,11 +253,8 @@ impl Renderer {
             return Ok(());
         }
         unsafe { self.device.device_wait_idle()? };
-        let surface_format = choose_surface_format(
-            &self.surface_loader,
-            self.physical_device,
-            self.surface,
-        )?;
+        let surface_format =
+            choose_surface_format(&self.surface_loader, self.physical_device, self.surface)?;
         let old = self.swap.swapchain;
         let new = create_swapchain(
             &self.swapchain_loader,
@@ -331,8 +326,7 @@ impl Renderer {
             .wait_semaphores(&signal)
             .swapchains(&swapchains)
             .image_indices(&indices);
-        let present_result =
-            unsafe { self.swapchain_loader.queue_present(self.queue, &present) };
+        let present_result = unsafe { self.swapchain_loader.queue_present(self.queue, &present) };
 
         self.current_frame = (frame + 1) % FRAMES_IN_FLIGHT;
 
@@ -388,7 +382,10 @@ impl Renderer {
             self.device.cmd_set_viewport(cmd, 0, &[viewport]);
             self.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
-            let resolution = [self.swap.extent.width as f32, self.swap.extent.height as f32];
+            let resolution = [
+                self.swap.extent.width as f32,
+                self.swap.extent.height as f32,
+            ];
             self.device.cmd_push_constants(
                 cmd,
                 self.pipeline_layout,
@@ -492,8 +489,7 @@ fn choose_surface_format(
     pd: vk::PhysicalDevice,
     surface: vk::SurfaceKHR,
 ) -> Result<vk::SurfaceFormatKHR> {
-    let formats =
-        unsafe { surface_loader.get_physical_device_surface_formats(pd, surface)? };
+    let formats = unsafe { surface_loader.get_physical_device_surface_formats(pd, surface)? };
     let chosen = formats
         .iter()
         .find(|f| {
@@ -551,8 +547,7 @@ fn create_swapchain(
     window_size: (u32, u32),
     old: vk::SwapchainKHR,
 ) -> Result<SwapchainBundle> {
-    let caps =
-        unsafe { surface_loader.get_physical_device_surface_capabilities(pd, surface)? };
+    let caps = unsafe { surface_loader.get_physical_device_surface_capabilities(pd, surface)? };
     let present_modes =
         unsafe { surface_loader.get_physical_device_surface_present_modes(pd, surface)? };
 
@@ -566,14 +561,12 @@ fn create_swapchain(
         caps.current_extent
     } else {
         vk::Extent2D {
-            width: window_size.0.clamp(
-                caps.min_image_extent.width,
-                caps.max_image_extent.width,
-            ),
-            height: window_size.1.clamp(
-                caps.min_image_extent.height,
-                caps.max_image_extent.height,
-            ),
+            width: window_size
+                .0
+                .clamp(caps.min_image_extent.width, caps.max_image_extent.width),
+            height: window_size
+                .1
+                .clamp(caps.min_image_extent.height, caps.max_image_extent.height),
         }
     };
 
@@ -581,6 +574,13 @@ fn create_swapchain(
     if caps.max_image_count > 0 && image_count > caps.max_image_count {
         image_count = caps.max_image_count;
     }
+
+    let composite_alpha = choose_composite_alpha(caps.supported_composite_alpha);
+    log::info!(
+        "swapchain composite alpha: {:?} (supported: {:?})",
+        composite_alpha,
+        caps.supported_composite_alpha
+    );
 
     let info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
@@ -592,7 +592,7 @@ fn create_swapchain(
         .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(caps.current_transform)
-        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .composite_alpha(composite_alpha)
         .present_mode(present_mode)
         .clipped(true)
         .old_swapchain(old);
@@ -633,6 +633,18 @@ fn create_swapchain(
         views,
         framebuffers,
     })
+}
+
+fn choose_composite_alpha(supported: vk::CompositeAlphaFlagsKHR) -> vk::CompositeAlphaFlagsKHR {
+    [
+        vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
+        vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+        vk::CompositeAlphaFlagsKHR::INHERIT,
+        vk::CompositeAlphaFlagsKHR::OPAQUE,
+    ]
+    .into_iter()
+    .find(|flag| supported.contains(*flag))
+    .unwrap_or(vk::CompositeAlphaFlagsKHR::OPAQUE)
 }
 
 fn create_pipeline(
@@ -723,8 +735,8 @@ fn create_pipeline(
         .alpha_blend_op(vk::BlendOp::ADD)
         .color_write_mask(vk::ColorComponentFlags::RGBA);
     let blend_attachments = [blend_attachment];
-    let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-        .attachments(&blend_attachments);
+    let color_blend =
+        vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
 
     let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic_state =
@@ -735,8 +747,7 @@ fn create_pipeline(
         .offset(0)
         .size(std::mem::size_of::<[f32; 2]>() as u32);
     let push_ranges = [push_range];
-    let layout_info =
-        vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push_ranges);
+    let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push_ranges);
     let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
 
     let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
@@ -803,9 +814,8 @@ fn create_host_buffer(
         .memory_type_index(mem_type);
     let memory = unsafe { device.allocate_memory(&alloc, None)? };
     unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
-    let mapped = unsafe {
-        device.map_memory(memory, 0, reqs.size, vk::MemoryMapFlags::empty())? as *mut u8
-    };
+    let mapped =
+        unsafe { device.map_memory(memory, 0, reqs.size, vk::MemoryMapFlags::empty())? as *mut u8 };
 
     Ok(Buffer {
         buffer,

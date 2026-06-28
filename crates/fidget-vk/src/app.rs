@@ -11,7 +11,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Window, WindowId, WindowLevel};
 
 use fidget_sim::{Bounds, ParticleKind, World};
 
@@ -188,7 +188,10 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title("Fidget-VK")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
+            .with_transparent(true)
+            .with_decorations(false)
+            .with_window_level(WindowLevel::AlwaysOnTop);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => w,
             Err(e) => {

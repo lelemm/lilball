@@ -5,10 +5,11 @@ and watch bounce around, with motion trails and particles. Inspired by the
 feel of squishy/throwable desktop toys.
 
 The original design targets a Windows always-on-top transparent overlay
-(Win32 + `ash`). **The current code is a Linux build** (winit + `ash`); the
-Windows overlay shell (transparency, click-through, tray, global hotkeys) is a
-planned port. The simulation and renderer are deliberately platform
-independent so they can be reused there.
+(Win32 + `ash`). **The current code is a Linux build** (winit + `ash`) that
+previews the transparent, borderless overlay look where the Linux compositor and
+Vulkan surface support alpha. The Windows shell (click-through, tray, global
+hotkeys) is a planned port. The simulation and renderer are deliberately
+platform independent so they can be reused there.
 
 ## Workspace layout
 
