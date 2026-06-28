@@ -77,7 +77,8 @@ impl App {
                     half: [p.radius * 0.55, p.radius * 0.55],
                     color: [col.x, col.y, col.z, a * 0.35],
                     softness: 1.0,
-                    _pad: [0.0; 3],
+                    material: 0.0,
+                    _pad: [0.0; 2],
                 });
             }
         }
@@ -100,7 +101,8 @@ impl App {
                     half: [p.size, p.size],
                     color: [base.x, base.y, base.z, lf * base.w * 0.9],
                     softness: 0.85,
-                    _pad: [0.0; 3],
+                    material: 0.0,
+                    _pad: [0.0; 2],
                 });
             }
         }
@@ -124,21 +126,24 @@ impl App {
             half: [r * 2.4 * sx, r * 2.4 * sy],
             color: [outer.x, outer.y, outer.z, 0.16],
             softness: 1.0,
-            _pad: [0.0; 3],
+            material: 0.0,
+            _pad: [0.0; 2],
         });
         self.instances.push(Instance {
             center: c,
             half: [r * 1.05 * sx, r * 1.05 * sy],
-            color: [outer.x, outer.y, outer.z, 0.9],
-            softness: 0.55,
-            _pad: [0.0; 3],
+            color: [1.0, 1.0, 1.0, 1.0],
+            softness: 0.08,
+            material: 1.0,
+            _pad: [0.0; 2],
         });
         self.instances.push(Instance {
             center: c,
-            half: [r * 0.72 * sx, r * 0.72 * sy],
-            color: [inner.x, inner.y, inner.z, 1.0],
-            softness: 0.45,
-            _pad: [0.0; 3],
+            half: [r * 1.1 * sx, r * 1.1 * sy],
+            color: [inner.x, inner.y, inner.z, 0.18],
+            softness: 0.82,
+            material: 0.0,
+            _pad: [0.0; 2],
         });
         let hl = ball.pos + Vec2::new(-0.32, -0.36) * r;
         self.instances.push(Instance {
@@ -146,7 +151,8 @@ impl App {
             half: [r * 0.3, r * 0.3],
             color: [1.0, 1.0, 1.0, 0.7],
             softness: 0.6,
-            _pad: [0.0; 3],
+            material: 0.0,
+            _pad: [0.0; 2],
         });
     }
 
@@ -355,7 +361,8 @@ fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
         half: [8.0, 8.0],
         color: [inner.x, inner.y, inner.z, 0.85],
         softness: 0.75,
-        _pad: [0.0; 3],
+        material: 0.0,
+        _pad: [0.0; 2],
     });
 
     if let Some(entanglement) = world.spring.entanglement {
@@ -384,7 +391,8 @@ fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
             half: [13.0, 13.0],
             color: [inner.x, inner.y, inner.z, 0.34 * intersection.strength()],
             softness: 0.9,
-            _pad: [0.0; 3],
+            material: 0.0,
+            _pad: [0.0; 2],
         });
     } else {
         push_coil_instances(instances, anchor, ball, outer, 0.62, 4.5, 12.0);
@@ -422,7 +430,8 @@ fn push_coil_instances(
             half: [dot_radius, dot_radius],
             color: [color.x, color.y, color.z, alpha],
             softness: 0.7,
-            _pad: [0.0; 3],
+            material: 0.0,
+            _pad: [0.0; 2],
         });
     }
 }
@@ -445,7 +454,8 @@ fn push_entangle_loop(
             half: [3.8, 3.8],
             color: [color.x, color.y, color.z, 0.58],
             softness: 0.72,
-            _pad: [0.0; 3],
+            material: 0.0,
+            _pad: [0.0; 2],
         });
     }
 }

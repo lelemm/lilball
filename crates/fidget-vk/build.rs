@@ -10,6 +10,7 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     // shaders live at the workspace root, one level above the crate.
     let shader_dir = Path::new(&manifest_dir).join("../../shaders");
+    let asset_dir = Path::new(&manifest_dir).join("../../assets");
 
     let shaders = ["blob.vert", "blob.frag"];
     let validator = std::env::var("GLSLANG_VALIDATOR").unwrap_or_else(|_| "glslangValidator".to_string());
@@ -30,4 +31,8 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!(
+        "cargo:rerun-if-changed={}",
+        asset_dir.join("soccer_ball_material.png").display()
+    );
 }
