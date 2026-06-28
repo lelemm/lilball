@@ -1,0 +1,19 @@
+[package]
+name = "fidget-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Platform-independent fidget toy simulation (ball physics, particles, trails)."
+
+[dependencies]
+glam.workspace = true
+serde = { workspace = true }
+log.workspace = true
+
+[dev-dependencies]
+approx = "0.5"
+
+[[bin]]
+name = "sim_demo"
+path = "src/bin/sim_demo.rs"
