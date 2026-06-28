@@ -292,16 +292,6 @@ pub fn run() -> Result<()> {
 fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
     let anchor = world.spring.anchor;
     let ball = world.ball.pos;
-    let delta = ball - anchor;
-    let len = delta.length();
-    if len <= 1.0 {
-        return;
-    }
-
-    let dir = delta / len;
-    let normal = Vec2::new(-dir.y, dir.x);
-    let coils = (len / 34.0).round().clamp(6.0, 22.0);
-    let segments = (coils as usize * 8).max(2);
     let outer = world.config.color_outer;
     let inner = world.config.color_inner;
 
@@ -313,17 +303,75 @@ fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
         _pad: [0.0; 3],
     });
 
+    if let Some(entanglement) = world.spring.entanglement {
+        push_coil_instances(instances, anchor, entanglement.center, outer, 0.5, 3.8, 9.0);
+        push_coil_instances(instances, entanglement.center, ball, outer, 0.72, 4.8, 13.0);
+        push_entangle_loop(
+            instances,
+            entanglement.center,
+            entanglement.radius,
+            inner,
+            outer,
+        );
+    } else {
+        push_coil_instances(instances, anchor, ball, outer, 0.62, 4.5, 12.0);
+    }
+}
+
+fn push_coil_instances(
+    instances: &mut Vec<Instance>,
+    start: Vec2,
+    end: Vec2,
+    color: Vec4,
+    alpha: f32,
+    dot_radius: f32,
+    wave_radius: f32,
+) {
+    let delta = end - start;
+    let len = delta.length();
+    if len <= 1.0 {
+        return;
+    }
+
+    let dir = delta / len;
+    let normal = Vec2::new(-dir.y, dir.x);
+    let coils = (len / 34.0).round().clamp(6.0, 22.0);
+    let segments = (coils as usize * 8).max(2);
+
     for i in 0..=segments {
         let t = i as f32 / segments as f32;
-        let base = anchor + delta * t;
+        let base = start + delta * t;
         let end_fade = (t * (1.0 - t) * 4.0).clamp(0.0, 1.0);
-        let wave = (t * coils * std::f32::consts::TAU).sin() * 12.0 * end_fade;
+        let wave = (t * coils * std::f32::consts::TAU).sin() * wave_radius * end_fade;
         let pos = base + normal * wave;
         instances.push(Instance {
             center: pos.to_array(),
-            half: [4.5, 4.5],
-            color: [outer.x, outer.y, outer.z, 0.62],
+            half: [dot_radius, dot_radius],
+            color: [color.x, color.y, color.z, alpha],
             softness: 0.7,
+            _pad: [0.0; 3],
+        });
+    }
+}
+
+fn push_entangle_loop(
+    instances: &mut Vec<Instance>,
+    center: Vec2,
+    radius: f32,
+    inner: Vec4,
+    outer: Vec4,
+) {
+    let loop_radius = radius.clamp(46.0, 96.0);
+    for i in 0..28 {
+        let t = i as f32 / 28.0;
+        let angle = t * std::f32::consts::TAU;
+        let pos = center + Vec2::new(angle.cos(), angle.sin()) * loop_radius;
+        let color = if i % 2 == 0 { inner } else { outer };
+        instances.push(Instance {
+            center: pos.to_array(),
+            half: [3.8, 3.8],
+            color: [color.x, color.y, color.z, 0.58],
+            softness: 0.72,
             _pad: [0.0; 3],
         });
     }

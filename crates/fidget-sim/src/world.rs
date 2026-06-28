@@ -64,6 +64,8 @@ pub struct World {
 
     accumulator: f32,
     cursor: Vec2,
+    cursor_vel: Vec2,
+    cursor_time: Option<f32>,
     mote_accum: f32,
     nudge_seed: u32,
 }
@@ -76,6 +78,8 @@ impl World {
         let trail = Trail::new(64, 0.45);
         Self {
             cursor: ball.pos,
+            cursor_vel: Vec2::ZERO,
+            cursor_time: None,
             config,
             bounds,
             ball,
@@ -139,6 +143,7 @@ impl World {
         let r = self.ball.radius;
         self.spring.attach();
         self.ball = Ball::new(self.spring.rest_position(), r);
+        self.cursor_vel = Vec2::ZERO;
         self.trail.clear();
     }
 
@@ -157,6 +162,7 @@ impl World {
     pub fn grab(&mut self, cursor: Vec2, now: f32) -> bool {
         self.cursor = cursor;
         if InteractionState::hit_test(&self.ball, cursor) {
+            self.spring.entanglement = None;
             self.interaction.begin_grab(&mut self.ball, cursor, now);
             // Small attraction motes toward the cursor when grabbed.
             if self.config.particles_enabled {
@@ -170,9 +176,26 @@ impl World {
     }
 
     pub fn move_cursor(&mut self, cursor: Vec2, now: f32) {
+        let prev_cursor = self.cursor;
+        if let Some(prev_time) = self.cursor_time {
+            let dt = now - prev_time;
+            if dt > 1e-4 {
+                self.cursor_vel = (cursor - self.cursor) / dt;
+            }
+        }
+        self.cursor_time = Some(now);
         self.cursor = cursor;
         if self.ball.grabbed {
             self.interaction.update_cursor(cursor, now);
+        } else if self
+            .spring
+            .try_entangle_sweep(&self.ball, prev_cursor, cursor, self.cursor_vel)
+        {
+            self.ball.wake();
+            if self.config.particles_enabled {
+                self.particles
+                    .emit_motes(cursor, self.cursor_vel, 10, self.config.color_outer);
+            }
         }
     }
 
@@ -213,6 +236,7 @@ impl World {
             self.interaction
                 .apply_spring(&mut self.ball, self.cursor, dt);
         } else if !self.ball.asleep {
+            self.spring.update_entanglement(self.cursor, dt);
             // Integrate gravity, the anchored spring, and drag.
             let spring_force = self.spring.force_on(&self.ball);
             self.ball.vel += (self.config.gravity + spring_force / self.ball.mass) * dt;
@@ -289,6 +313,7 @@ impl World {
     /// Whether anything is visibly animating (used for idle frame pacing).
     pub fn is_active(&self) -> bool {
         self.ball.grabbed
+            || self.spring.entanglement.is_some()
             || !self.ball.asleep
             || !self.particles.is_empty()
             || !self.trail.is_empty()

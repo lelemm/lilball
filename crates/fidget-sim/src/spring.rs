@@ -3,6 +3,27 @@ use glam::Vec2;
 use crate::ball::Ball;
 use crate::bounds::Bounds;
 
+/// Temporary wrap point created when a fast cursor sweep snags the spring.
+#[derive(Debug, Clone, Copy)]
+pub struct CursorEntanglement {
+    pub center: Vec2,
+    pub radius: f32,
+    pub angle: f32,
+    pub angular_velocity: f32,
+    pub age: f32,
+    pub max_age: f32,
+}
+
+impl CursorEntanglement {
+    pub fn target(&self) -> Vec2 {
+        self.center + Vec2::new(self.angle.cos(), self.angle.sin()) * self.radius
+    }
+
+    pub fn tangent_velocity(&self) -> Vec2 {
+        Vec2::new(-self.angle.sin(), self.angle.cos()) * self.angular_velocity * self.radius
+    }
+}
+
 /// Anchored spring that suspends the ball from the top of the play area.
 #[derive(Debug, Clone, Copy)]
 pub struct SpringState {
@@ -13,6 +34,9 @@ pub struct SpringState {
     pub max_force: f32,
     pub recall_margin: f32,
     pub attached: bool,
+    pub entanglement: Option<CursorEntanglement>,
+    pub entangle_capture_radius: f32,
+    pub entangle_min_cursor_speed: f32,
 }
 
 impl SpringState {
@@ -26,6 +50,9 @@ impl SpringState {
             max_force: 18_000.0,
             recall_margin: 900.0,
             attached: true,
+            entanglement: None,
+            entangle_capture_radius: 72.0,
+            entangle_min_cursor_speed: 850.0,
         }
     }
 
@@ -40,15 +67,28 @@ impl SpringState {
 
     pub fn cut(&mut self) {
         self.attached = false;
+        self.entanglement = None;
     }
 
     pub fn attach(&mut self) {
         self.attached = true;
+        self.entanglement = None;
     }
 
     pub fn force_on(&self, ball: &Ball) -> Vec2 {
         if !self.attached {
             return Vec2::ZERO;
+        }
+
+        if let Some(entanglement) = self.entanglement {
+            let target = entanglement.target();
+            let desired_vel = entanglement.tangent_velocity();
+            let mut force = (target - ball.pos) * 210.0 + (desired_vel - ball.vel) * 26.0;
+            let mag = force.length();
+            if mag > self.max_force {
+                force *= self.max_force / mag;
+            }
+            return force;
         }
 
         let delta = ball.pos - self.anchor;
@@ -71,9 +111,118 @@ impl SpringState {
     pub fn should_recall(&self, ball: &Ball, bounds: Bounds) -> bool {
         !self.attached && ball.pos.y - ball.radius > bounds.bottom + self.recall_margin
     }
+
+    pub fn try_entangle(&mut self, ball: &Ball, cursor: Vec2, cursor_vel: Vec2) -> bool {
+        self.try_entangle_sweep(ball, cursor, cursor, cursor_vel)
+    }
+
+    pub fn try_entangle_sweep(
+        &mut self,
+        ball: &Ball,
+        prev_cursor: Vec2,
+        cursor: Vec2,
+        cursor_vel: Vec2,
+    ) -> bool {
+        if !self.attached || self.entanglement.is_some() {
+            return false;
+        }
+
+        let cursor_speed = cursor_vel.length();
+        if cursor_speed < self.entangle_min_cursor_speed {
+            return false;
+        }
+
+        let spring_hit = segment_distance(prev_cursor, cursor, self.anchor, ball.pos)
+            <= self.entangle_capture_radius;
+        let ball_hit = cursor.distance(ball.pos) <= ball.radius + self.entangle_capture_radius;
+        if !spring_hit && !ball_hit {
+            return false;
+        }
+
+        let to_ball = ball.pos - cursor;
+        let radius = to_ball.length().clamp(ball.radius * 1.25, 180.0);
+        let start_dir = if to_ball.length_squared() > 1.0 {
+            to_ball.normalize()
+        } else {
+            Vec2::Y
+        };
+        let inertia = (cursor_speed + ball.speed() * 0.5).clamp(0.0, 4500.0);
+        let cross = cursor_vel.perp_dot(start_dir);
+        let spin_sign = if cross.abs() > 1.0 {
+            cross.signum()
+        } else if cursor_vel.x >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let angular_velocity = spin_sign * (inertia / radius).clamp(5.0, 18.0);
+        let max_age = (0.45 + inertia / 2600.0).clamp(0.65, 1.8);
+
+        self.entanglement = Some(CursorEntanglement {
+            center: cursor,
+            radius,
+            angle: start_dir.y.atan2(start_dir.x),
+            angular_velocity,
+            age: 0.0,
+            max_age,
+        });
+        true
+    }
+
+    pub fn update_entanglement(&mut self, cursor: Vec2, dt: f32) {
+        let Some(mut entanglement) = self.entanglement else {
+            return;
+        };
+
+        entanglement.center = cursor;
+        entanglement.age += dt;
+        entanglement.angle += entanglement.angular_velocity * dt;
+        entanglement.angular_velocity *= (-dt * 1.15).exp();
+
+        if entanglement.age >= entanglement.max_age || entanglement.angular_velocity.abs() < 1.4 {
+            self.entanglement = None;
+        } else {
+            self.entanglement = Some(entanglement);
+        }
+    }
 }
 
 fn anchor_for(bounds: Bounds) -> Vec2 {
     let inset = (bounds.height() * 0.08).clamp(36.0, 72.0);
     Vec2::new(bounds.center().x, bounds.top + inset)
+}
+
+fn distance_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let denom = ab.length_squared();
+    if denom <= 1e-4 {
+        return p.distance(a);
+    }
+    let t = (p - a).dot(ab) / denom;
+    p.distance(a + ab * t.clamp(0.0, 1.0))
+}
+
+fn segment_distance(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> f32 {
+    if segments_intersect(a0, a1, b0, b1) {
+        return 0.0;
+    }
+
+    distance_to_segment(a0, b0, b1)
+        .min(distance_to_segment(a1, b0, b1))
+        .min(distance_to_segment(b0, a0, a1))
+        .min(distance_to_segment(b1, a0, a1))
+}
+
+fn segments_intersect(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> bool {
+    let a = a1 - a0;
+    let b = b1 - b0;
+    let denom = a.perp_dot(b);
+    if denom.abs() <= 1e-5 {
+        return false;
+    }
+
+    let delta = b0 - a0;
+    let t = delta.perp_dot(b) / denom;
+    let u = delta.perp_dot(a) / denom;
+    (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)
 }

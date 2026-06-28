@@ -139,6 +139,67 @@ fn fallen_ball_recalls_to_spring() {
 }
 
 #[test]
+fn slow_cursor_sweep_does_not_entangle_spring() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid + Vec2::new(-30.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(30.0, 0.0), 0.25);
+
+    assert!(world.spring.entanglement.is_none());
+}
+
+#[test]
+fn fast_cursor_sweep_entangles_spring() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid + Vec2::new(-140.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(140.0, 0.0), 0.04);
+
+    assert!(
+        world.spring.entanglement.is_some(),
+        "fast cursor inertia near the spring should snag it"
+    );
+}
+
+#[test]
+fn entanglement_pushes_ball_around_cursor() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    world.move_cursor(spring_mid + Vec2::new(-140.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(140.0, 0.0), 0.04);
+
+    let x0 = world.ball.pos.x;
+    for _ in 0..30 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(world.spring.entanglement.is_some());
+    assert!(
+        (world.ball.pos.x - x0).abs() > 6.0,
+        "entangled ball should orbit laterally, x0={x0}, pos={:?}",
+        world.ball.pos
+    );
+}
+
+#[test]
+fn cursor_entanglement_expires() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    world.move_cursor(spring_mid + Vec2::new(-140.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(140.0, 0.0), 0.04);
+    assert!(world.spring.entanglement.is_some());
+
+    for _ in 0..360 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(world.spring.entanglement.is_none());
+    assert!(world.spring_attached());
+}
+
+#[test]
 fn hit_test_inside_and_outside() {
     let ball = Ball::new(Vec2::new(100.0, 100.0), 40.0);
     assert!(InteractionState::hit_test(&ball, Vec2::new(110.0, 110.0)));

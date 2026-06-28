@@ -19,7 +19,7 @@ pub use ball::Ball;
 pub use bounds::Bounds;
 pub use interaction::{InteractionState, PointerSample};
 pub use particles::{Particle, ParticleKind, ParticleSystem};
-pub use spring::SpringState;
+pub use spring::{CursorEntanglement, SpringState};
 pub use trail::{Trail, TrailPoint};
 pub use world::{World, WorldConfig};
 
