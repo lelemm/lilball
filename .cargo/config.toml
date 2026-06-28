@@ -1,0 +1,13 @@
+# The app currently targets the host platform (Linux). The Windows overlay
+# port (Win32 transparency / tray / global hotkeys) is planned but deferred.
+#
+# `fidget-sim` is platform independent; `fidget-vk` uses winit + ash (Vulkan)
+# which build natively on Linux.
+#
+# When the Windows port is revived, cross-compiling from WSL only needs the
+# mingw linker below plus `rustup target add x86_64-pc-windows-gnu`, then build
+# with `--target x86_64-pc-windows-gnu`.
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"

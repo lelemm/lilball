@@ -1,0 +1,25 @@
+[package]
+name = "fidget-vk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Vulkan-rendered desktop fidget toy (Linux build; Windows overlay port planned)."
+default-run = "fidget-vk"
+
+[dependencies]
+fidget-sim = { path = "../fidget-sim" }
+ash = { version = "0.38", features = ["loaded"] }
+ash-window = "0.13"
+raw-window-handle = "0.6"
+winit = "0.30"
+glam.workspace = true
+log.workspace = true
+env_logger = "0.11"
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+directories = "5"
+
+[build-dependencies]
+anyhow.workspace = true
