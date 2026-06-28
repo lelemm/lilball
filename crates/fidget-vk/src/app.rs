@@ -239,10 +239,13 @@ impl App {
 
     fn show_hud(&mut self, ctx: &egui::Context) {
         if !self.hud_visible {
-            egui::Area::new("hud_toggle".into())
+            egui::Window::new("HUD")
+                .title_bar(false)
+                .resizable(false)
+                .collapsible(false)
                 .fixed_pos(egui::pos2(18.0, 18.0))
                 .show(ctx, |ui| {
-                    if ui.button("HUD").clicked() {
+                    if ui.button("Show Fidget controls").clicked() {
                         self.hud_visible = true;
                     }
                 });
