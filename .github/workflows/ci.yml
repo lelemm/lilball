@@ -97,3 +97,34 @@ jobs:
           name: fidget-vk-windows-x86_64
           path: target/release/fidget-vk.exe
           if-no-files-found: error
+
+  windows-cross:
+    name: Windows cross build from Linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cross build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            glslang-tools \
+            mingw-w64 \
+            gcc-mingw-w64-x86-64
+
+      - name: Cross build Windows release
+        run: tools/build-windows.sh
+
+      - name: Upload cross-built Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fidget-vk-windows-x86_64-cross
+          path: target/x86_64-pc-windows-gnu/release/fidget-vk.exe
+          if-no-files-found: error
