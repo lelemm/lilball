@@ -16,6 +16,10 @@ pub struct Ball {
     pub squash_impulse: f32,
     /// Direction along which the squash is applied (unit vector, collision normal).
     pub squash_dir: Vec2,
+    /// Accumulated visual roll angle in radians, derived from travelled distance.
+    pub roll_angle: f32,
+    /// Last non-zero movement direction used to orient the rolling texture.
+    pub roll_dir: Vec2,
     /// Seconds the ball has been (nearly) still; used to drive sleep.
     pub still_time: f32,
     pub asleep: bool,
@@ -33,6 +37,8 @@ impl Ball {
             grabbed: false,
             squash_impulse: 0.0,
             squash_dir: Vec2::Y,
+            roll_angle: 0.0,
+            roll_dir: Vec2::X,
             still_time: 0.0,
             asleep: false,
         }
@@ -65,6 +71,18 @@ impl Ball {
         self.squash_dir = normal;
         self.squash_impulse = (self.squash_impulse + strength).min(0.6);
         self.wake();
+    }
+
+    /// Advance the visual roll from world-space movement. One full radius of
+    /// travel rotates the material by one radian, matching a rolling sphere.
+    pub fn roll_by(&mut self, delta: Vec2) {
+        let distance = delta.length();
+        if distance <= 0.001 || self.radius <= 0.001 {
+            return;
+        }
+        self.roll_dir = delta / distance;
+        self.roll_angle =
+            (self.roll_angle + distance / self.radius).rem_euclid(std::f32::consts::TAU);
     }
 
     pub fn wake(&mut self) {

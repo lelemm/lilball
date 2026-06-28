@@ -285,6 +285,8 @@ impl World {
     }
 
     fn step(&mut self, dt: f32) {
+        let prev_ball_pos = self.ball.pos;
+
         if self.ball.grabbed {
             self.interaction
                 .apply_spring(&mut self.ball, self.cursor, dt);
@@ -301,6 +303,8 @@ impl World {
             }
             self.ball.pos += self.ball.vel * dt;
         }
+
+        self.ball.roll_by(self.ball.pos - prev_ball_pos);
 
         // Decay the squash impulse.
         self.ball.squash_impulse *= (-dt * 14.0).exp();

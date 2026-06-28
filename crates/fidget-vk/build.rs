@@ -12,8 +12,9 @@ fn main() {
     let shader_dir = Path::new(&manifest_dir).join("../../shaders");
     let asset_dir = Path::new(&manifest_dir).join("../../assets");
 
-    let shaders = ["blob.vert", "blob.frag"];
-    let validator = std::env::var("GLSLANG_VALIDATOR").unwrap_or_else(|_| "glslangValidator".to_string());
+    let shaders = ["blob.vert", "blob.frag", "ball_mesh.vert", "ball_mesh.frag"];
+    let validator =
+        std::env::var("GLSLANG_VALIDATOR").unwrap_or_else(|_| "glslangValidator".to_string());
 
     for shader in shaders {
         let src = shader_dir.join(shader);
@@ -34,5 +35,11 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         asset_dir.join("soccer_ball_material.png").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        asset_dir
+            .join("Meshy_AI_Soccer_ball_0628153454_texture.glb")
+            .display()
     );
 }

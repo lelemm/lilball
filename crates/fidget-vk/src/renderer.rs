@@ -23,7 +23,8 @@ pub struct Instance {
     pub color: [f32; 4],
     pub softness: f32,
     pub material: f32,
-    pub _pad: [f32; 2],
+    /// xy = stretch/roll axis, z = visual roll angle in radians.
+    pub roll: [f32; 4],
 }
 
 pub struct EguiDrawData<'a> {
@@ -38,7 +39,11 @@ const FRAMES_IN_FLIGHT: usize = 2;
 // Embedded compiled shaders (produced by build.rs).
 const VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blob.vert.spv"));
 const FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blob.frag.spv"));
+const MESH_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ball_mesh.vert.spv"));
+const MESH_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ball_mesh.frag.spv"));
 const SOCCER_TEXTURE_PNG: &[u8] = include_bytes!("../../../assets/soccer_ball_material.png");
+const SOCCER_GLB: &[u8] =
+    include_bytes!("../../../assets/Meshy_AI_Soccer_ball_0628153454_texture.glb");
 
 /// A GPU buffer plus its backing memory and (optional) persistent mapping.
 struct Buffer {
@@ -52,6 +57,21 @@ struct Texture {
     memory: vk::DeviceMemory,
     view: vk::ImageView,
     sampler: vk::Sampler,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MeshVertex {
+    pos: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
+
+struct BallMesh {
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
+    index_count: u32,
+    texture: Texture,
 }
 
 /// Swapchain-dependent resources, recreated on resize.
@@ -79,13 +99,15 @@ pub struct Renderer {
     descriptor_set: vk::DescriptorSet,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    mesh_pipeline_layout: vk::PipelineLayout,
+    mesh_pipeline: vk::Pipeline,
     egui_renderer: Option<EguiRenderer>,
 
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
     quad_buffer: Buffer,
     instance_buffers: Vec<Buffer>,
-    ball_texture: Texture,
+    ball_mesh: BallMesh,
 
     image_available: Vec<vk::Semaphore>,
     render_finished: Vec<vk::Semaphore>,
@@ -172,6 +194,8 @@ impl Renderer {
         let descriptor_set_layout = create_descriptor_set_layout(&device)?;
         let (pipeline_layout, pipeline) =
             create_pipeline(&device, render_pass, descriptor_set_layout)?;
+        let (mesh_pipeline_layout, mesh_pipeline) =
+            create_mesh_pipeline(&device, render_pass, descriptor_set_layout)?;
         let egui_renderer = EguiRenderer::with_default_allocator(
             &instance,
             physical_device,
@@ -237,10 +261,10 @@ impl Renderer {
             )?);
         }
 
-        let ball_texture =
-            create_texture(&device, &mem_props, command_pool, queue, SOCCER_TEXTURE_PNG)?;
+        let ball_mesh = create_ball_mesh(&device, &mem_props, command_pool, queue, SOCCER_GLB)
+            .context("failed to load GLB soccer ball mesh")?;
         let (descriptor_pool, descriptor_set) =
-            create_texture_descriptor(&device, descriptor_set_layout, &ball_texture)?;
+            create_texture_descriptor(&device, descriptor_set_layout, &ball_mesh.texture)?;
 
         // --- Sync primitives ----------------------------------------------
         let mut image_available = Vec::new();
@@ -277,12 +301,14 @@ impl Renderer {
             descriptor_set,
             pipeline_layout,
             pipeline,
+            mesh_pipeline_layout,
+            mesh_pipeline,
             egui_renderer: Some(egui_renderer),
             command_pool,
             command_buffers,
             quad_buffer,
             instance_buffers,
-            ball_texture,
+            ball_mesh,
             image_available,
             render_finished,
             in_flight,
@@ -368,17 +394,29 @@ impl Renderer {
                 .map_err(|e| anyhow!("failed to upload egui textures: {e}"))?;
         }
 
-        // Upload instances for this frame.
-        let count = instances.len().min(MAX_INSTANCES);
+        // Upload blob instances for this frame. The material=1 ball body
+        // instance becomes the transform for the GLB mesh draw instead.
+        let mut count = 0usize;
+        let mut ball_instance = None;
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                instances.as_ptr() as *const u8,
-                self.instance_buffers[frame].mapped,
-                count * std::mem::size_of::<Instance>(),
-            );
+            let dst = self.instance_buffers[frame].mapped as *mut Instance;
+            for instance in instances {
+                if instance.material > 0.5 {
+                    ball_instance = Some(*instance);
+                } else if count < MAX_INSTANCES {
+                    dst.add(count).write(*instance);
+                    count += 1;
+                }
+            }
         }
 
-        self.record_command_buffer(frame, image_index as usize, count as u32, egui.as_ref())?;
+        self.record_command_buffer(
+            frame,
+            image_index as usize,
+            count as u32,
+            ball_instance,
+            egui.as_ref(),
+        )?;
 
         let wait = [self.image_available[frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -416,6 +454,7 @@ impl Renderer {
         frame: usize,
         image_index: usize,
         count: u32,
+        ball_instance: Option<Instance>,
         egui: Option<&EguiDrawData<'_>>,
     ) -> Result<()> {
         let cmd = self.command_buffers[frame];
@@ -493,6 +532,53 @@ impl Renderer {
                 self.device.cmd_draw(cmd, 6, count, 0, 0);
             }
 
+            if let Some(ball) = ball_instance {
+                let mesh_push = [
+                    [
+                        self.swap.extent.width as f32,
+                        self.swap.extent.height as f32,
+                        ball.center[0],
+                        ball.center[1],
+                    ],
+                    [ball.half[0], ball.half[1], ball.roll[0], ball.roll[1]],
+                    [ball.roll[2], 0.0, 0.0, 0.0],
+                ];
+                self.device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.mesh_pipeline,
+                );
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.mesh_pipeline_layout,
+                    0,
+                    &[self.descriptor_set],
+                    &[],
+                );
+                self.device.cmd_push_constants(
+                    cmd,
+                    self.mesh_pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    bytemuck_bytes(&mesh_push),
+                );
+                self.device.cmd_bind_vertex_buffers(
+                    cmd,
+                    0,
+                    &[self.ball_mesh.vertex_buffer.buffer],
+                    &[0],
+                );
+                self.device.cmd_bind_index_buffer(
+                    cmd,
+                    self.ball_mesh.index_buffer.buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device
+                    .cmd_draw_indexed(cmd, self.ball_mesh.index_count, 1, 0, 0, 0);
+            }
+
             if let Some(egui) = egui {
                 self.egui_renderer
                     .as_mut()
@@ -543,13 +629,18 @@ impl Drop for Renderer {
             for b in &self.instance_buffers {
                 destroy_buffer(&self.device, b);
             }
-            destroy_texture(&self.device, &self.ball_texture);
+            destroy_buffer(&self.device, &self.ball_mesh.index_buffer);
+            destroy_buffer(&self.device, &self.ball_mesh.vertex_buffer);
+            destroy_texture(&self.device, &self.ball_mesh.texture);
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
             destroy_buffer(&self.device, &self.quad_buffer);
             self.device.destroy_command_pool(self.command_pool, None);
+            self.device.destroy_pipeline(self.mesh_pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.mesh_pipeline_layout, None);
             self.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
@@ -827,6 +918,11 @@ fn create_pipeline(
             .binding(1)
             .format(vk::Format::R32_SFLOAT)
             .offset(36),
+        vk::VertexInputAttributeDescription::default()
+            .location(6)
+            .binding(1)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(40),
     ];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&bindings)
@@ -905,6 +1001,116 @@ fn create_pipeline(
     Ok((pipeline_layout, pipeline))
 }
 
+fn create_mesh_pipeline(
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+) -> Result<(vk::PipelineLayout, vk::Pipeline)> {
+    let vert = create_shader_module(device, MESH_VERT_SPV)?;
+    let frag = create_shader_module(device, MESH_FRAG_SPV)?;
+
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vert)
+            .name(c"main"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(frag)
+            .name(c"main"),
+    ];
+
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(std::mem::size_of::<MeshVertex>() as u32)
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let attributes = [
+        vk::VertexInputAttributeDescription::default()
+            .location(0)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(0),
+        vk::VertexInputAttributeDescription::default()
+            .location(1)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(12),
+        vk::VertexInputAttributeDescription::default()
+            .location(2)
+            .binding(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(24),
+    ];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&bindings)
+        .vertex_attribute_descriptions(&attributes);
+
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::ONE)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD)
+        .color_write_mask(vk::ColorComponentFlags::RGBA);
+    let blend_attachments = [blend_attachment];
+    let color_blend =
+        vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state =
+        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let push_range = vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX)
+        .offset(0)
+        .size(std::mem::size_of::<[[f32; 4]; 3]>() as u32);
+    let push_ranges = [push_range];
+    let set_layouts = [descriptor_set_layout];
+    let layout_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&set_layouts)
+        .push_constant_ranges(&push_ranges);
+    let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
+
+    let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterizer)
+        .multisample_state(&multisample)
+        .color_blend_state(&color_blend)
+        .dynamic_state(&dynamic_state)
+        .layout(pipeline_layout)
+        .render_pass(render_pass)
+        .subpass(0);
+
+    let pipeline = unsafe {
+        device
+            .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+            .map_err(|(_, e)| anyhow!("failed to create mesh graphics pipeline: {e}"))?[0]
+    };
+
+    unsafe {
+        device.destroy_shader_module(vert, None);
+        device.destroy_shader_module(frag, None);
+    }
+
+    Ok((pipeline_layout, pipeline))
+}
+
 fn create_shader_module(device: &ash::Device, spv: &[u8]) -> Result<vk::ShaderModule> {
     let mut code = Vec::with_capacity(spv.len() / 4);
     for chunk in spv.chunks_exact(4) {
@@ -912,6 +1118,274 @@ fn create_shader_module(device: &ash::Device, spv: &[u8]) -> Result<vk::ShaderMo
     }
     let info = vk::ShaderModuleCreateInfo::default().code(&code);
     Ok(unsafe { device.create_shader_module(&info, None)? })
+}
+
+struct LoadedBallMesh {
+    vertices: Vec<MeshVertex>,
+    indices: Vec<u32>,
+    base_color: Vec<u8>,
+}
+
+fn create_ball_mesh(
+    device: &ash::Device,
+    mem_props: &vk::PhysicalDeviceMemoryProperties,
+    command_pool: vk::CommandPool,
+    queue: vk::Queue,
+    glb: &[u8],
+) -> Result<BallMesh> {
+    let mesh = load_ball_mesh(glb)?;
+
+    let vertex_size = (mesh.vertices.len() * std::mem::size_of::<MeshVertex>()) as vk::DeviceSize;
+    let vertex_buffer = create_host_buffer(
+        device,
+        mem_props,
+        vertex_size,
+        vk::BufferUsageFlags::VERTEX_BUFFER,
+    )?;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            mesh.vertices.as_ptr() as *const u8,
+            vertex_buffer.mapped,
+            vertex_size as usize,
+        );
+    }
+
+    let index_size = (mesh.indices.len() * std::mem::size_of::<u32>()) as vk::DeviceSize;
+    let index_buffer = create_host_buffer(
+        device,
+        mem_props,
+        index_size,
+        vk::BufferUsageFlags::INDEX_BUFFER,
+    )?;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            mesh.indices.as_ptr() as *const u8,
+            index_buffer.mapped,
+            index_size as usize,
+        );
+    }
+
+    let texture = create_texture(device, mem_props, command_pool, queue, &mesh.base_color)?;
+    log::info!(
+        "loaded GLB ball mesh: {} vertices, {} indices",
+        mesh.vertices.len(),
+        mesh.indices.len()
+    );
+
+    Ok(BallMesh {
+        vertex_buffer,
+        index_buffer,
+        index_count: mesh.indices.len() as u32,
+        texture,
+    })
+}
+
+fn load_ball_mesh(glb: &[u8]) -> Result<LoadedBallMesh> {
+    if glb.len() < 20 || &glb[0..4] != b"glTF" {
+        return Err(anyhow!("ball asset is not a GLB file"));
+    }
+
+    let mut offset = 12usize;
+    let mut json_chunk = None;
+    let mut bin_chunk = None;
+    while offset + 8 <= glb.len() {
+        let len = u32::from_le_bytes(glb[offset..offset + 4].try_into().unwrap()) as usize;
+        let kind = u32::from_le_bytes(glb[offset + 4..offset + 8].try_into().unwrap());
+        offset += 8;
+        if offset + len > glb.len() {
+            return Err(anyhow!("GLB chunk exceeds file length"));
+        }
+        match kind {
+            0x4E4F_534A => json_chunk = Some(&glb[offset..offset + len]),
+            0x004E_4942 => bin_chunk = Some(&glb[offset..offset + len]),
+            _ => {}
+        }
+        offset += len;
+    }
+
+    let json = serde_json::from_slice::<serde_json::Value>(
+        json_chunk.ok_or_else(|| anyhow!("GLB missing JSON chunk"))?,
+    )
+    .context("failed to parse GLB JSON")?;
+    let bin = bin_chunk.ok_or_else(|| anyhow!("GLB missing BIN chunk"))?;
+
+    let primitive = &json["meshes"][0]["primitives"][0];
+    let position_accessor = value_usize(&primitive["attributes"]["POSITION"])?;
+    let normal_accessor = value_usize(&primitive["attributes"]["NORMAL"])?;
+    let uv_accessor = value_usize(&primitive["attributes"]["TEXCOORD_0"])?;
+    let index_accessor = value_usize(&primitive["indices"])?;
+
+    let positions = read_vec3_accessor(&json, bin, position_accessor)?;
+    let normals = read_vec3_accessor(&json, bin, normal_accessor)?;
+    let uvs = read_vec2_accessor(&json, bin, uv_accessor)?;
+    let indices = read_index_accessor(&json, bin, index_accessor)?;
+    if positions.len() != normals.len() || positions.len() != uvs.len() {
+        return Err(anyhow!("GLB mesh attribute counts do not match"));
+    }
+
+    let max_extent = positions
+        .iter()
+        .flat_map(|p| p.iter())
+        .map(|v| v.abs())
+        .fold(0.0_f32, f32::max)
+        .max(0.001);
+    let vertices = positions
+        .into_iter()
+        .zip(normals)
+        .zip(uvs)
+        .map(|((pos, normal), uv)| MeshVertex {
+            pos: [
+                pos[0] / max_extent,
+                pos[1] / max_extent,
+                pos[2] / max_extent,
+            ],
+            normal,
+            uv,
+        })
+        .collect();
+
+    let material_index = value_usize(&primitive["material"])?;
+    let texture_index = value_usize(
+        &json["materials"][material_index]["pbrMetallicRoughness"]["baseColorTexture"]["index"],
+    )?;
+    let image_index = value_usize(&json["textures"][texture_index]["source"])?;
+    let base_color =
+        read_image_bytes(&json, bin, image_index).unwrap_or_else(|_| SOCCER_TEXTURE_PNG.to_vec());
+
+    Ok(LoadedBallMesh {
+        vertices,
+        indices,
+        base_color,
+    })
+}
+
+fn value_usize(value: &serde_json::Value) -> Result<usize> {
+    value
+        .as_u64()
+        .map(|v| v as usize)
+        .ok_or_else(|| anyhow!("expected unsigned GLB index, got {value}"))
+}
+
+fn read_vec3_accessor(
+    json: &serde_json::Value,
+    bin: &[u8],
+    accessor_index: usize,
+) -> Result<Vec<[f32; 3]>> {
+    let values = read_f32_accessor(json, bin, accessor_index, 3)?;
+    Ok(values.chunks_exact(3).map(|v| [v[0], v[1], v[2]]).collect())
+}
+
+fn read_vec2_accessor(
+    json: &serde_json::Value,
+    bin: &[u8],
+    accessor_index: usize,
+) -> Result<Vec<[f32; 2]>> {
+    let values = read_f32_accessor(json, bin, accessor_index, 2)?;
+    Ok(values.chunks_exact(2).map(|v| [v[0], v[1]]).collect())
+}
+
+fn read_f32_accessor(
+    json: &serde_json::Value,
+    bin: &[u8],
+    accessor_index: usize,
+    components: usize,
+) -> Result<Vec<f32>> {
+    let accessor = &json["accessors"][accessor_index];
+    if value_usize(&accessor["componentType"])? != 5126 {
+        return Err(anyhow!("GLB accessor {accessor_index} is not f32"));
+    }
+    let count = value_usize(&accessor["count"])?;
+    let view_index = value_usize(&accessor["bufferView"])?;
+    let (start, stride) = accessor_view(json, accessor, view_index, components * 4)?;
+    let mut out = Vec::with_capacity(count * components);
+    for i in 0..count {
+        let base = start + i * stride;
+        for c in 0..components {
+            let off = base + c * 4;
+            out.push(read_f32(bin, off)?);
+        }
+    }
+    Ok(out)
+}
+
+fn read_index_accessor(
+    json: &serde_json::Value,
+    bin: &[u8],
+    accessor_index: usize,
+) -> Result<Vec<u32>> {
+    let accessor = &json["accessors"][accessor_index];
+    let count = value_usize(&accessor["count"])?;
+    let component_type = value_usize(&accessor["componentType"])?;
+    let component_size = match component_type {
+        5121 => 1,
+        5123 => 2,
+        5125 => 4,
+        _ => {
+            return Err(anyhow!(
+                "unsupported GLB index component type {component_type}"
+            ))
+        }
+    };
+    let view_index = value_usize(&accessor["bufferView"])?;
+    let (start, stride) = accessor_view(json, accessor, view_index, component_size)?;
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = start + i * stride;
+        let index = match component_type {
+            5121 => *bin
+                .get(off)
+                .ok_or_else(|| anyhow!("GLB u8 index out of bounds"))? as u32,
+            5123 => {
+                let bytes = bin
+                    .get(off..off + 2)
+                    .ok_or_else(|| anyhow!("GLB u16 index out of bounds"))?;
+                u16::from_le_bytes(bytes.try_into().unwrap()) as u32
+            }
+            5125 => {
+                let bytes = bin
+                    .get(off..off + 4)
+                    .ok_or_else(|| anyhow!("GLB u32 index out of bounds"))?;
+                u32::from_le_bytes(bytes.try_into().unwrap())
+            }
+            _ => unreachable!(),
+        };
+        out.push(index);
+    }
+    Ok(out)
+}
+
+fn read_image_bytes(json: &serde_json::Value, bin: &[u8], image_index: usize) -> Result<Vec<u8>> {
+    let view_index = value_usize(&json["images"][image_index]["bufferView"])?;
+    let view = &json["bufferViews"][view_index];
+    let start = view["byteOffset"].as_u64().unwrap_or(0) as usize;
+    let len = value_usize(&view["byteLength"])?;
+    Ok(bin
+        .get(start..start + len)
+        .ok_or_else(|| anyhow!("GLB image buffer view out of bounds"))?
+        .to_vec())
+}
+
+fn accessor_view(
+    json: &serde_json::Value,
+    accessor: &serde_json::Value,
+    view_index: usize,
+    tight_stride: usize,
+) -> Result<(usize, usize)> {
+    let view = &json["bufferViews"][view_index];
+    let view_offset = view["byteOffset"].as_u64().unwrap_or(0) as usize;
+    let accessor_offset = accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
+    let stride = view["byteStride"]
+        .as_u64()
+        .map(|v| v as usize)
+        .unwrap_or(tight_stride);
+    Ok((view_offset + accessor_offset, stride))
+}
+
+fn read_f32(bytes: &[u8], offset: usize) -> Result<f32> {
+    let slice = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| anyhow!("GLB f32 accessor out of bounds"))?;
+    Ok(f32::from_le_bytes(slice.try_into().unwrap()))
 }
 
 fn create_texture(
@@ -1240,4 +1714,21 @@ fn end_one_time_commands(
         device.free_command_buffers(command_pool, &[cmd]);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_embedded_glb_ball_mesh() {
+        let mesh = load_ball_mesh(SOCCER_GLB).expect("embedded GLB mesh should load");
+
+        assert_eq!(mesh.vertices.len(), 6_944);
+        assert_eq!(mesh.indices.len(), 24_924);
+        assert!(
+            mesh.base_color.starts_with(&[0xFF, 0xD8, 0xFF]),
+            "base color should be the embedded JPEG texture"
+        );
+    }
 }

@@ -4,6 +4,7 @@ layout(location = 0) in vec2 v_local;     // [-1,1] quad-local coords
 layout(location = 1) in vec4 v_color;     // rgba (a = intensity)
 layout(location = 2) in float v_softness; // edge softness
 layout(location = 3) in float v_material; // 0 = glow blob, 1 = soccer ball
+layout(location = 4) in vec4 v_roll;      // xy = movement axis, z = roll angle
 
 layout(set = 0, binding = 0) uniform sampler2D u_ball_texture;
 
@@ -15,10 +16,17 @@ vec4 soccer_ball(vec2 local) {
         discard;
     }
 
-    vec2 uv = local * 0.5 + 0.5;
+    float z = sqrt(max(0.0, 1.0 - r2));
+    vec2 axis = normalize(v_roll.xy);
+    vec2 tangent = vec2(-axis.y, axis.x);
+    float along = dot(local, axis);
+    float across = dot(local, tangent);
+    float spin = v_roll.z;
+    float rolled_along = along * cos(spin) - z * sin(spin);
+    vec2 material_local = axis * rolled_along + tangent * across;
+    vec2 uv = material_local * 0.5 + 0.5;
     vec3 tex = texture(u_ball_texture, uv).rgb;
 
-    float z = sqrt(max(0.0, 1.0 - r2));
     vec3 sphere_normal = normalize(vec3(local.x, -local.y, z));
 
     // Use texture luminance changes as a tiny height field. This keeps seams
