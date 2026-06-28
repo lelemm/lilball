@@ -8,6 +8,7 @@ use anyhow::Result;
 use glam::{Vec2, Vec4};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -29,6 +30,12 @@ pub struct App {
     last_frame: Instant,
     cursor: Vec2,
     instances: Vec<Instance>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OverlayGeometry {
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
 }
 
 impl App {
@@ -186,9 +193,11 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
+        let overlay = overlay_geometry(event_loop);
         let attrs = Window::default_attributes()
             .with_title("Fidget-VK")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
+            .with_position(overlay.position)
+            .with_inner_size(overlay.size)
             .with_transparent(true)
             .with_decorations(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
@@ -200,6 +209,8 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        window.set_outer_position(overlay.position);
+        let _ = window.request_inner_size(overlay.size);
 
         let size = window.inner_size();
         let display = window.display_handle().unwrap().as_raw();
@@ -212,6 +223,13 @@ impl ApplicationHandler for App {
                 self.renderer = Some(renderer);
                 self.window = Some(window);
                 self.last_frame = Instant::now();
+                log::info!(
+                    "transparent overlay geometry: pos=({}, {}) size={}x{}",
+                    overlay.position.x,
+                    overlay.position.y,
+                    size.width,
+                    size.height
+                );
                 log::info!(
                     "Fidget-VK is running. Drag the ball; brush/sweep the spring to displace or entangle it; right-click or C=cut/recall spring, N=fling, R=reset, G=gravity, Esc=quit"
                 );
@@ -290,6 +308,37 @@ pub fn run() -> Result<()> {
     let mut app = App::new(settings);
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+fn overlay_geometry(event_loop: &ActiveEventLoop) -> OverlayGeometry {
+    let mut monitors = event_loop.available_monitors();
+    let Some(first) = monitors.next() else {
+        return OverlayGeometry {
+            position: PhysicalPosition::new(0, 0),
+            size: PhysicalSize::new(1280, 720),
+        };
+    };
+
+    let pos = first.position();
+    let size = first.size();
+    let mut left = pos.x;
+    let mut top = pos.y;
+    let mut right = pos.x + size.width as i32;
+    let mut bottom = pos.y + size.height as i32;
+
+    for monitor in monitors {
+        let pos = monitor.position();
+        let size = monitor.size();
+        left = left.min(pos.x);
+        top = top.min(pos.y);
+        right = right.max(pos.x + size.width as i32);
+        bottom = bottom.max(pos.y + size.height as i32);
+    }
+
+    OverlayGeometry {
+        position: PhysicalPosition::new(left, top),
+        size: PhysicalSize::new((right - left).max(1) as u32, (bottom - top).max(1) as u32),
+    }
 }
 
 fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
