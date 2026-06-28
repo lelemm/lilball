@@ -8,7 +8,7 @@
 
 use std::ffi::CStr;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use ash::vk;
 use egui::{ClippedPrimitive, TextureId, TexturesDelta};
 use egui_ash_renderer::{Options as EguiRendererOptions, Renderer as EguiRenderer};

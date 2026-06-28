@@ -1,6 +1,6 @@
 use approx::assert_relative_eq;
 use fidget_sim::{
-    Ball, Bounds, FIXED_DT, InteractionState, ParticleSystem, Trail, World, WorldConfig,
+    Ball, Bounds, InteractionState, ParticleSystem, Trail, World, WorldConfig, FIXED_DT,
 };
 use glam::{Vec2, Vec4};
 

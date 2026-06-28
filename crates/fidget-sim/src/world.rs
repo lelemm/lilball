@@ -1,6 +1,5 @@
 use glam::{Vec2, Vec4};
 
-use crate::FIXED_DT;
 use crate::ball::Ball;
 use crate::bounds::Bounds;
 use crate::collisions;
@@ -8,6 +7,7 @@ use crate::interaction::InteractionState;
 use crate::particles::ParticleSystem;
 use crate::spring::SpringState;
 use crate::trail::Trail;
+use crate::FIXED_DT;
 
 /// Tunable simulation parameters. The renderer reads colours from here too so
 /// the "material" of the ball is data-driven.
