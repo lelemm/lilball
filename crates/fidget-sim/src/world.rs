@@ -158,6 +158,42 @@ impl World {
         self.ball.wake();
     }
 
+    pub fn gravity_strength(&self) -> f32 {
+        self.config.gravity.y
+    }
+
+    pub fn set_gravity_strength(&mut self, gravity: f32) {
+        self.config.gravity = Vec2::new(0.0, gravity.clamp(0.0, 2400.0));
+        self.ball.wake();
+    }
+
+    pub fn spring_stiffness(&self) -> f32 {
+        self.spring.stiffness
+    }
+
+    pub fn set_spring_stiffness(&mut self, stiffness: f32) {
+        self.spring.stiffness = stiffness.clamp(15.0, 420.0);
+        self.ball.wake();
+    }
+
+    pub fn spring_damping(&self) -> f32 {
+        self.spring.damping
+    }
+
+    pub fn set_spring_damping(&mut self, damping: f32) {
+        self.spring.damping = damping.clamp(2.0, 90.0);
+        self.ball.wake();
+    }
+
+    pub fn hook_offset_y(&self) -> f32 {
+        self.spring.hook_offset_y
+    }
+
+    pub fn set_hook_offset_y(&mut self, offset_y: f32) {
+        self.spring.set_hook_offset_y(self.bounds, offset_y);
+        self.ball.wake();
+    }
+
     // --- Interaction -------------------------------------------------------
 
     /// Returns true if a grab started (cursor was over the ball).

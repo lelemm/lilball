@@ -20,6 +20,10 @@ anyhow.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 directories = "5"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+egui = "0.33"
+egui-winit = "0.33"
+egui-ash-renderer = "0.11.0"
 
 [build-dependencies]
 anyhow.workspace = true

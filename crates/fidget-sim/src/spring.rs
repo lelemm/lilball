@@ -44,6 +44,7 @@ impl CursorIntersection {
 #[derive(Debug, Clone, Copy)]
 pub struct SpringState {
     pub anchor: Vec2,
+    pub hook_offset_y: f32,
     pub rest_length: f32,
     pub stiffness: f32,
     pub damping: f32,
@@ -59,9 +60,11 @@ pub struct SpringState {
 
 impl SpringState {
     pub fn new(bounds: Bounds, ball_pos: Vec2) -> Self {
-        let anchor = anchor_for(bounds);
+        let hook_offset_y = -120.0;
+        let anchor = anchor_for(bounds) + Vec2::Y * hook_offset_y;
         Self {
             anchor,
+            hook_offset_y,
             rest_length: ball_pos.distance(anchor).max(1.0),
             stiffness: 85.0,
             damping: 20.0,
@@ -77,7 +80,13 @@ impl SpringState {
     }
 
     pub fn set_bounds(&mut self, bounds: Bounds) {
-        self.anchor = anchor_for(bounds);
+        self.anchor = anchor_for(bounds) + Vec2::Y * self.hook_offset_y;
+        self.rest_length = bounds.center().distance(self.anchor).max(1.0);
+    }
+
+    pub fn set_hook_offset_y(&mut self, bounds: Bounds, offset_y: f32) {
+        self.hook_offset_y = offset_y.clamp(-600.0, 260.0);
+        self.anchor = anchor_for(bounds) + Vec2::Y * self.hook_offset_y;
         self.rest_length = bounds.center().distance(self.anchor).max(1.0);
     }
 

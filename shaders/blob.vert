@@ -8,6 +8,7 @@ layout(location = 1) in vec2 i_center;    // center in logical pixels
 layout(location = 2) in vec2 i_half;      // half-extent (rx, ry) in pixels
 layout(location = 3) in vec4 i_color;     // rgba, alpha used as intensity
 layout(location = 4) in float i_softness; // 0 = hard edge, 1 = fully soft
+layout(location = 5) in float i_material; // 0 = glow blob, 1 = soccer ball
 
 layout(push_constant) uniform Push {
     vec2 resolution; // framebuffer size in pixels
@@ -16,6 +17,7 @@ layout(push_constant) uniform Push {
 layout(location = 0) out vec2 v_local;
 layout(location = 1) out vec4 v_color;
 layout(location = 2) out float v_softness;
+layout(location = 3) out float v_material;
 
 void main() {
     vec2 world = i_center + a_corner * i_half;
@@ -25,4 +27,5 @@ void main() {
     v_local = a_corner;
     v_color = i_color;
     v_softness = i_softness;
+    v_material = i_material;
 }

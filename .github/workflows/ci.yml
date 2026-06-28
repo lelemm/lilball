@@ -1,0 +1,213 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "cursor/**"
+  pull_request:
+    branches:
+      - main
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            glslang-tools \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            pkg-config \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxinerama-dev \
+            zip
+
+      - name: Test simulation
+        run: cargo test -p fidget-sim
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build Linux release
+        run: cargo build --release -p fidget-vk
+
+      - name: Package Linux release
+        run: |
+          package="fidget-vk-linux-x86_64"
+          mkdir -p "dist/$package"
+          cp target/release/fidget-vk "dist/$package/"
+          cp LICENSE "dist/$package/"
+          cat > "dist/$package/README.txt" <<'EOF'
+          Fidget-VK Linux preview
+
+          Run:
+            ./fidget-vk
+
+          Requirements:
+            - Vulkan-capable GPU driver/runtime
+            - Linux desktop session with X11 or Wayland support
+
+          This is the Linux preview overlay. The Windows-specific shell
+          (click-through, tray, global hotkeys) is still planned.
+          EOF
+          chmod +x "dist/$package/fidget-vk"
+          (cd dist && zip -r "$package.zip" "$package")
+
+      - name: Upload Linux package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fidget-vk-linux-x86_64
+          path: dist/fidget-vk-linux-x86_64.zip
+          if-no-files-found: error
+
+      - name: Upload Linux package to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/fidget-vk-linux-x86_64.zip
+
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk --no-progress -y
+          $sdk = Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $sdk) {
+            throw "Vulkan SDK installation did not create C:\VulkanSDK"
+          }
+          $bin = Join-Path $sdk.FullName "Bin"
+          "GLSLANG_VALIDATOR=$(Join-Path $bin 'glslangValidator.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Test simulation
+        run: cargo test -p fidget-sim
+
+      - name: Build Windows release
+        run: cargo build --release -p fidget-vk
+
+      - name: Package Windows release
+        shell: pwsh
+        run: |
+          $package = "fidget-vk-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path "dist/$package" | Out-Null
+          Copy-Item "target/release/fidget-vk.exe" "dist/$package/"
+          Copy-Item "LICENSE" "dist/$package/"
+          @"
+          Fidget-VK Windows preview
+
+          Run:
+            fidget-vk.exe
+
+          Requirements:
+            - Vulkan-capable GPU driver/runtime
+
+          This is the Windows build of the current winit/ash preview app.
+          The Windows-specific shell (click-through, tray, global hotkeys)
+          is still planned.
+          "@ | Set-Content "dist/$package/README.txt"
+          Compress-Archive -Path "dist/$package/*" -DestinationPath "dist/$package.zip" -Force
+
+      - name: Upload Windows package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fidget-vk-windows-x86_64
+          path: dist/fidget-vk-windows-x86_64.zip
+          if-no-files-found: error
+
+      - name: Upload Windows package to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/fidget-vk-windows-x86_64.zip
+
+  windows-cross:
+    name: Windows cross build from Linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cross build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            glslang-tools \
+            mingw-w64 \
+            gcc-mingw-w64-x86-64 \
+            zip
+
+      - name: Cross build Windows release
+        run: tools/build-windows.sh
+
+      - name: Package cross-built Windows release
+        run: |
+          package="fidget-vk-windows-x86_64-cross"
+          mkdir -p "dist/$package"
+          cp target/x86_64-pc-windows-gnu/release/fidget-vk.exe "dist/$package/"
+          cp LICENSE "dist/$package/"
+          cat > "dist/$package/README.txt" <<'EOF'
+          Fidget-VK Windows preview (cross-built from Linux)
+
+          Run:
+            fidget-vk.exe
+
+          Requirements:
+            - Vulkan-capable GPU driver/runtime
+
+          This package verifies the Linux/WSL cross-compilation path.
+          EOF
+          (cd dist && zip -r "$package.zip" "$package")
+
+      - name: Upload cross-built Windows package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fidget-vk-windows-x86_64-cross
+          path: dist/fidget-vk-windows-x86_64-cross.zip
+          if-no-files-found: error
