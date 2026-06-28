@@ -10,6 +10,8 @@ use std::ffi::CStr;
 
 use anyhow::{anyhow, Context, Result};
 use ash::vk;
+use egui::{ClippedPrimitive, TextureId, TexturesDelta};
+use egui_ash_renderer::{Options as EguiRendererOptions, Renderer as EguiRenderer};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 /// Per-instance vertex data. Layout must match `shaders/blob.vert`.
@@ -22,6 +24,12 @@ pub struct Instance {
     pub softness: f32,
     pub material: f32,
     pub _pad: [f32; 2],
+}
+
+pub struct EguiDrawData<'a> {
+    pub textures_delta: &'a TexturesDelta,
+    pub clipped_primitives: &'a [ClippedPrimitive],
+    pub pixels_per_point: f32,
 }
 
 const MAX_INSTANCES: usize = 8192;
@@ -71,6 +79,7 @@ pub struct Renderer {
     descriptor_set: vk::DescriptorSet,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    egui_renderer: Option<EguiRenderer>,
 
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
@@ -81,6 +90,7 @@ pub struct Renderer {
     image_available: Vec<vk::Semaphore>,
     render_finished: Vec<vk::Semaphore>,
     in_flight: Vec<vk::Fence>,
+    pending_egui_texture_frees: Vec<Vec<TextureId>>,
     current_frame: usize,
 
     /// Background clear colour (dark so additive glow pops).
@@ -162,6 +172,19 @@ impl Renderer {
         let descriptor_set_layout = create_descriptor_set_layout(&device)?;
         let (pipeline_layout, pipeline) =
             create_pipeline(&device, render_pass, descriptor_set_layout)?;
+        let egui_renderer = EguiRenderer::with_default_allocator(
+            &instance,
+            physical_device,
+            device.clone(),
+            render_pass,
+            EguiRendererOptions {
+                in_flight_frames: FRAMES_IN_FLIGHT,
+                enable_depth_test: false,
+                enable_depth_write: false,
+                srgb_framebuffer: false,
+            },
+        )
+        .map_err(|e| anyhow!("failed to create egui renderer: {e}"))?;
 
         // --- Command pool + buffers ----------------------------------------
         let command_pool = unsafe {
@@ -214,23 +237,16 @@ impl Renderer {
             )?);
         }
 
-        let ball_texture = create_texture(
-            &device,
-            &mem_props,
-            command_pool,
-            queue,
-            SOCCER_TEXTURE_PNG,
-        )?;
-        let (descriptor_pool, descriptor_set) = create_texture_descriptor(
-            &device,
-            descriptor_set_layout,
-            &ball_texture,
-        )?;
+        let ball_texture =
+            create_texture(&device, &mem_props, command_pool, queue, SOCCER_TEXTURE_PNG)?;
+        let (descriptor_pool, descriptor_set) =
+            create_texture_descriptor(&device, descriptor_set_layout, &ball_texture)?;
 
         // --- Sync primitives ----------------------------------------------
         let mut image_available = Vec::new();
         let mut render_finished = Vec::new();
         let mut in_flight = Vec::new();
+        let mut pending_egui_texture_frees = Vec::new();
         for _ in 0..FRAMES_IN_FLIGHT {
             unsafe {
                 image_available
@@ -241,6 +257,7 @@ impl Renderer {
                     &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
                     None,
                 )?);
+                pending_egui_texture_frees.push(Vec::new());
             }
         }
 
@@ -260,6 +277,7 @@ impl Renderer {
             descriptor_set,
             pipeline_layout,
             pipeline,
+            egui_renderer: Some(egui_renderer),
             command_pool,
             command_buffers,
             quad_buffer,
@@ -268,6 +286,7 @@ impl Renderer {
             image_available,
             render_finished,
             in_flight,
+            pending_egui_texture_frees,
             current_frame: 0,
             clear_color: [0.0, 0.0, 0.0, 0.0],
         })
@@ -306,11 +325,23 @@ impl Renderer {
 
     /// Render one frame from the given instances. Returns `Ok(false)` if the
     /// swapchain needs recreation (the caller should call `resize`).
-    pub fn render(&mut self, instances: &[Instance]) -> Result<bool> {
+    pub fn render(
+        &mut self,
+        instances: &[Instance],
+        egui: Option<EguiDrawData<'_>>,
+    ) -> Result<bool> {
         let frame = self.current_frame;
         let fence = self.in_flight[frame];
         unsafe {
             self.device.wait_for_fences(&[fence], true, u64::MAX)?;
+        }
+        if !self.pending_egui_texture_frees[frame].is_empty() {
+            let ids = std::mem::take(&mut self.pending_egui_texture_frees[frame]);
+            self.egui_renderer
+                .as_mut()
+                .expect("egui renderer")
+                .free_textures(&ids)
+                .map_err(|e| anyhow!("failed to free egui textures: {e}"))?;
         }
 
         let acquire = unsafe {
@@ -329,6 +360,14 @@ impl Renderer {
 
         unsafe { self.device.reset_fences(&[fence])? };
 
+        if let Some(egui) = egui.as_ref() {
+            self.egui_renderer
+                .as_mut()
+                .expect("egui renderer")
+                .set_textures(self.queue, self.command_pool, &egui.textures_delta.set)
+                .map_err(|e| anyhow!("failed to upload egui textures: {e}"))?;
+        }
+
         // Upload instances for this frame.
         let count = instances.len().min(MAX_INSTANCES);
         unsafe {
@@ -339,7 +378,7 @@ impl Renderer {
             );
         }
 
-        self.record_command_buffer(frame, image_index as usize, count as u32)?;
+        self.record_command_buffer(frame, image_index as usize, count as u32, egui.as_ref())?;
 
         let wait = [self.image_available[frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -361,6 +400,9 @@ impl Renderer {
         let present_result = unsafe { self.swapchain_loader.queue_present(self.queue, &present) };
 
         self.current_frame = (frame + 1) % FRAMES_IN_FLIGHT;
+        if let Some(egui) = egui {
+            self.pending_egui_texture_frees[frame].extend(egui.textures_delta.free.iter().copied());
+        }
 
         match present_result {
             Ok(false) => Ok(true),
@@ -369,7 +411,13 @@ impl Renderer {
         }
     }
 
-    fn record_command_buffer(&self, frame: usize, image_index: usize, count: u32) -> Result<()> {
+    fn record_command_buffer(
+        &mut self,
+        frame: usize,
+        image_index: usize,
+        count: u32,
+        egui: Option<&EguiDrawData<'_>>,
+    ) -> Result<()> {
         let cmd = self.command_buffers[frame];
         unsafe {
             self.device
@@ -445,6 +493,19 @@ impl Renderer {
                 self.device.cmd_draw(cmd, 6, count, 0, 0);
             }
 
+            if let Some(egui) = egui {
+                self.egui_renderer
+                    .as_mut()
+                    .expect("egui renderer")
+                    .cmd_draw(
+                        cmd,
+                        self.swap.extent,
+                        egui.pixels_per_point,
+                        egui.clipped_primitives,
+                    )
+                    .map_err(|e| anyhow!("failed to draw egui HUD: {e}"))?;
+            }
+
             self.device.cmd_end_render_pass(cmd);
             self.device.end_command_buffer(cmd)?;
         }
@@ -469,6 +530,7 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
+            drop(self.egui_renderer.take());
             for &s in &self.image_available {
                 self.device.destroy_semaphore(s, None);
             }
@@ -866,12 +928,7 @@ fn create_texture(
     let pixels = image.into_raw();
     let size = pixels.len() as vk::DeviceSize;
 
-    let staging = create_host_buffer(
-        device,
-        mem_props,
-        size,
-        vk::BufferUsageFlags::TRANSFER_SRC,
-    )?;
+    let staging = create_host_buffer(device, mem_props, size, vk::BufferUsageFlags::TRANSFER_SRC)?;
     unsafe {
         std::ptr::copy_nonoverlapping(pixels.as_ptr(), staging.mapped, pixels.len());
     }
@@ -904,7 +961,15 @@ fn create_texture(
     let memory = unsafe { device.allocate_memory(&alloc, None)? };
     unsafe { device.bind_image_memory(image, memory, 0)? };
 
-    copy_buffer_to_image(device, command_pool, queue, staging.buffer, image, width, height)?;
+    copy_buffer_to_image(
+        device,
+        command_pool,
+        queue,
+        staging.buffer,
+        image,
+        width,
+        height,
+    )?;
     destroy_buffer(device, &staging);
 
     let view_info = vk::ImageViewCreateInfo::default()
@@ -1154,8 +1219,8 @@ fn begin_one_time_commands(
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
     let cmd = unsafe { device.allocate_command_buffers(&alloc)?[0] };
-    let begin = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe { device.begin_command_buffer(cmd, &begin)? };
     Ok(cmd)
 }

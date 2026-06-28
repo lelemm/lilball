@@ -18,7 +18,7 @@ use winit::window::{Window, WindowId, WindowLevel};
 use fidget_sim::{Bounds, ParticleKind, World};
 
 use crate::config::Settings;
-use crate::renderer::{Instance, Renderer};
+use crate::renderer::{EguiDrawData, Instance, Renderer};
 
 pub struct App {
     settings: Settings,
@@ -31,6 +31,9 @@ pub struct App {
     last_frame: Instant,
     cursor: Vec2,
     instances: Vec<Instance>,
+    egui_ctx: egui::Context,
+    egui_state: Option<egui_winit::State>,
+    hud_visible: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,6 +55,9 @@ impl App {
             last_frame: Instant::now(),
             cursor: Vec2::ZERO,
             instances: Vec::with_capacity(4096),
+            egui_ctx: egui::Context::default(),
+            egui_state: None,
+            hud_visible: true,
         }
     }
 
@@ -164,12 +170,51 @@ impl App {
             dt
         };
         self.world.advance(dt);
+
+        let egui_output = if self.hud_visible {
+            let raw_input = {
+                let window = self.window.as_ref().expect("window exists while redrawing");
+                self.egui_state
+                    .as_mut()
+                    .expect("egui state exists while redrawing")
+                    .take_egui_input(window)
+            };
+            let ctx = self.egui_ctx.clone();
+            let full_output = ctx.run(raw_input, |ctx| self.show_hud(ctx));
+            {
+                let window = self.window.as_ref().expect("window exists while redrawing");
+                self.egui_state
+                    .as_mut()
+                    .expect("egui state exists while redrawing")
+                    .handle_platform_output(window, full_output.platform_output);
+            }
+            let pixels_per_point = ctx.pixels_per_point();
+            let clipped_primitives = ctx.tessellate(full_output.shapes, pixels_per_point);
+            Some((
+                full_output.textures_delta,
+                clipped_primitives,
+                pixels_per_point,
+            ))
+        } else {
+            None
+        };
+
         self.build_instances();
 
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        match renderer.render(&self.instances) {
+        let egui_draw =
+            egui_output
+                .as_ref()
+                .map(
+                    |(textures_delta, clipped_primitives, pixels_per_point)| EguiDrawData {
+                        textures_delta,
+                        clipped_primitives,
+                        pixels_per_point: *pixels_per_point,
+                    },
+                );
+        match renderer.render(&self.instances, egui_draw) {
             Ok(true) => {}
             Ok(false) => {
                 // Swapchain out of date: recreate at the current window size.
@@ -192,6 +237,58 @@ impl App {
                 event_loop.exit();
             }
         }
+    }
+
+    fn show_hud(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Fidget controls")
+            .default_pos(egui::pos2(18.0, 18.0))
+            .default_width(290.0)
+            .show(ctx, |ui| {
+                ui.label("H toggles this HUD");
+                ui.separator();
+
+                let mut gravity = self.world.gravity_strength();
+                if ui
+                    .add(egui::Slider::new(&mut gravity, 0.0..=2400.0).text("gravity"))
+                    .changed()
+                {
+                    self.world.set_gravity_strength(gravity);
+                }
+
+                let mut stiffness = self.world.spring_stiffness();
+                if ui
+                    .add(egui::Slider::new(&mut stiffness, 15.0..=420.0).text("string elasticity"))
+                    .changed()
+                {
+                    self.world.set_spring_stiffness(stiffness);
+                }
+
+                let mut damping = self.world.spring_damping();
+                if ui
+                    .add(egui::Slider::new(&mut damping, 2.0..=90.0).text("string damping"))
+                    .changed()
+                {
+                    self.world.set_spring_damping(damping);
+                }
+
+                let mut hook = self.world.hook_offset_y();
+                if ui
+                    .add(egui::Slider::new(&mut hook, -600.0..=260.0).text("hook y offset"))
+                    .changed()
+                {
+                    self.world.set_hook_offset_y(hook);
+                }
+                ui.small("Negative hook offset places the string hook above the desktop.");
+
+                ui.horizontal(|ui| {
+                    if ui.button("Reset ball").clicked() {
+                        self.world.reset();
+                    }
+                    if ui.button("Cut/recall").clicked() {
+                        self.world.toggle_spring();
+                    }
+                });
+            });
     }
 }
 
@@ -224,6 +321,14 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         let display = window.display_handle().unwrap().as_raw();
         let win = window.window_handle().unwrap().as_raw();
+        let egui_state = egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            window.theme(),
+            None,
+        );
 
         match Renderer::new(display, win, (size.width, size.height)) {
             Ok(renderer) => {
@@ -231,6 +336,7 @@ impl ApplicationHandler for App {
                     .set_bounds(Bounds::new(0.0, 0.0, size.width as f32, size.height as f32));
                 self.renderer = Some(renderer);
                 self.window = Some(window);
+                self.egui_state = Some(egui_state);
                 self.last_frame = Instant::now();
                 log::info!(
                     "transparent overlay geometry: pos=({}, {}) size={}x{}",
@@ -251,6 +357,28 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let h_pressed = matches!(
+            &event,
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyH))
+        );
+        if h_pressed {
+            self.hud_visible = !self.hud_visible;
+        }
+
+        let egui_consumed = if self.hud_visible {
+            if let (Some(window), Some(egui_state)) =
+                (self.window.as_ref(), self.egui_state.as_mut())
+            {
+                egui_state.on_window_event(window, &event).consumed
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -261,11 +389,17 @@ impl ApplicationHandler for App {
                     .set_bounds(Bounds::new(0.0, 0.0, size.width as f32, size.height as f32));
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if egui_consumed {
+                    return;
+                }
                 self.cursor = Vec2::new(position.x as f32, position.y as f32);
                 let now = self.now();
                 self.world.move_cursor(self.cursor, now);
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if egui_consumed {
+                    return;
+                }
                 if button == MouseButton::Left {
                     let now = self.now();
                     match state {
@@ -281,6 +415,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if egui_consumed {
+                    return;
+                }
                 if event.state == ElementState::Pressed {
                     match event.physical_key {
                         PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
@@ -289,6 +426,7 @@ impl ApplicationHandler for App {
                         }
                         PhysicalKey::Code(KeyCode::KeyC) => self.world.toggle_spring(),
                         PhysicalKey::Code(KeyCode::KeyG) => self.world.toggle_gravity(),
+                        PhysicalKey::Code(KeyCode::KeyH) => {}
                         PhysicalKey::Code(KeyCode::KeyN) => self.world.nudge(2800.0),
                         _ => {}
                     }

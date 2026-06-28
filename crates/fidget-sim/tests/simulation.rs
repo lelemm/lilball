@@ -93,6 +93,32 @@ fn attached_spring_pulls_ball_toward_rest_position() {
 }
 
 #[test]
+fn hook_defaults_above_screen_top() {
+    let world = no_gravity_world();
+    assert!(
+        world.spring.anchor.y < world.bounds.top,
+        "hook should default off-screen above the desktop, anchor={:?}",
+        world.spring.anchor
+    );
+}
+
+#[test]
+fn hud_parameter_setters_clamp_and_apply() {
+    let mut world = no_gravity_world();
+
+    world.set_gravity_strength(1800.0);
+    world.set_spring_stiffness(320.0);
+    world.set_spring_damping(44.0);
+    world.set_hook_offset_y(-300.0);
+
+    assert_relative_eq!(world.gravity_strength(), 1800.0);
+    assert_relative_eq!(world.spring_stiffness(), 320.0);
+    assert_relative_eq!(world.spring_damping(), 44.0);
+    assert_relative_eq!(world.hook_offset_y(), -300.0);
+    assert!(world.spring.anchor.y < world.bounds.top);
+}
+
+#[test]
 fn cut_spring_lets_ball_fall_through_bottom() {
     let mut world = World::new(WorldConfig::default(), Bounds::new(0.0, 0.0, 1000.0, 600.0));
     let r = world.ball.radius;
