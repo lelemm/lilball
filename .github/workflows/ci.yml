@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "cursor/**"
+  pull_request:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            glslang-tools \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            pkg-config \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxinerama-dev
+
+      - name: Test simulation
+        run: cargo test -p fidget-sim
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build Linux release
+        run: cargo build --release -p fidget-vk
+
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fidget-vk-linux-x86_64
+          path: target/release/fidget-vk
+          if-no-files-found: error
+
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk --no-progress -y
+          $sdk = Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $sdk) {
+            throw "Vulkan SDK installation did not create C:\VulkanSDK"
+          }
+          $bin = Join-Path $sdk.FullName "Bin"
+          "GLSLANG_VALIDATOR=$(Join-Path $bin 'glslangValidator.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Test simulation
+        run: cargo test -p fidget-sim
+
+      - name: Build Windows release
+        run: cargo build --release -p fidget-vk
+
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fidget-vk-windows-x86_64
+          path: target/release/fidget-vk.exe
+          if-no-files-found: error
