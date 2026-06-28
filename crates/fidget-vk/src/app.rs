@@ -19,7 +19,7 @@ use winit::window::{Window, WindowId, WindowLevel};
 use fidget_sim::{Bounds, ParticleKind, World};
 
 use crate::config::Settings;
-use crate::renderer::{EguiDrawData, Instance, Renderer};
+use crate::renderer::{EguiDrawData, Instance, Renderer, RubberBandMesh};
 
 pub struct App {
     settings: Settings,
@@ -32,6 +32,7 @@ pub struct App {
     last_frame: Instant,
     cursor: Vec2,
     instances: Vec<Instance>,
+    rubber_band: RubberBandMesh,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     hud_visible: bool,
@@ -56,6 +57,7 @@ impl App {
             last_frame: Instant::now(),
             cursor: Vec2::ZERO,
             instances: Vec::with_capacity(4096),
+            rubber_band: RubberBandMesh::with_capacity(2048, 8192),
             egui_ctx: egui::Context::default(),
             egui_state: None,
             hud_visible: true,
@@ -70,6 +72,7 @@ impl App {
         let world = &self.world;
         let cfg = &world.config;
         self.instances.clear();
+        self.rubber_band.clear();
 
         // Trail (drawn first, faint and soft).
         if cfg.trail_enabled {
@@ -91,7 +94,7 @@ impl App {
         }
 
         if world.spring.attached {
-            push_spring_instances(&mut self.instances, world);
+            rebuild_rubber_band(&mut self.rubber_band, world);
         }
 
         // Particles.
@@ -196,7 +199,7 @@ impl App {
                         pixels_per_point: *pixels_per_point,
                     },
                 );
-        match renderer.render(&self.instances, egui_draw) {
+        match renderer.render(&self.instances, &self.rubber_band, egui_draw) {
             Ok(true) => {}
             Ok(false) => {
                 // Swapchain out of date: recreate at the current window size.
@@ -270,7 +273,7 @@ impl App {
                         stiffness -= 25.0;
                     }
                     ui.add(
-                        egui::Slider::new(&mut stiffness, 15.0..=420.0).text("string elasticity"),
+                        egui::Slider::new(&mut stiffness, 15.0..=420.0).text("rubber elasticity"),
                     );
                     if ui.button("stiff").clicked() {
                         stiffness += 25.0;
@@ -286,7 +289,7 @@ impl App {
                     if ui.button("-").clicked() {
                         damping -= 6.0;
                     }
-                    ui.add(egui::Slider::new(&mut damping, 2.0..=90.0).text("string damping"));
+                    ui.add(egui::Slider::new(&mut damping, 2.0..=90.0).text("rubber damping"));
                     if ui.button("+").clicked() {
                         damping += 6.0;
                     }
@@ -311,7 +314,7 @@ impl App {
                 if (hook - old_hook).abs() > f32::EPSILON {
                     self.world.set_hook_offset_y(hook);
                 }
-                ui.small("Negative hook offset places the string hook above the desktop.");
+                ui.small("Negative hook offset places the rubber-band hook above the desktop.");
 
                 ui.horizontal(|ui| {
                     if ui.button("Reset ball").clicked() {
@@ -381,7 +384,7 @@ impl ApplicationHandler for App {
                     size.height
                 );
                 log::info!(
-                    "Fidget-VK is running. Drag the ball; brush/sweep the spring to displace or entangle it; right-click or C=cut/recall spring, N=fling, R=reset, G=gravity, Esc=quit"
+                    "Fidget-VK is running. Drag the ball; brush/sweep the rubber band to displace or entangle it; right-click or C=cut/recall rubber band, N=fling, R=reset, G=gravity, Esc=quit"
                 );
             }
             Err(e) => {
@@ -519,112 +522,49 @@ fn overlay_geometry(event_loop: &ActiveEventLoop) -> OverlayGeometry {
     }
 }
 
-fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
+fn rebuild_rubber_band(mesh: &mut RubberBandMesh, world: &World) {
     let anchor = world.spring.anchor;
     let ball = world.ball.pos;
-    let outer = world.config.color_outer;
-    let inner = world.config.color_inner;
+    let mut path = Vec::with_capacity(32);
+    let mut joints = Vec::with_capacity(6);
 
-    instances.push(Instance {
-        center: anchor.to_array(),
-        half: [8.0, 8.0],
-        color: [inner.x, inner.y, inner.z, 0.85],
-        softness: 0.75,
-        material: 0.0,
-        roll: [1.0, 0.0, 0.0, 0.0],
-    });
-
+    path.push(anchor);
+    joints.push(anchor);
     if let Some(entanglement) = world.spring.entanglement {
-        push_coil_instances(instances, anchor, entanglement.center, outer, 0.5, 3.8, 9.0);
-        push_coil_instances(instances, entanglement.center, ball, outer, 0.72, 4.8, 13.0);
-        push_entangle_loop(
-            instances,
-            entanglement.center,
-            entanglement.radius,
-            inner,
-            outer,
-        );
+        let loop_radius = entanglement.radius.clamp(world.ball.radius * 0.8, 150.0);
+        let start_angle = (anchor - entanglement.center).to_angle();
+        let spin = entanglement.angular_velocity.signum();
+        let spin = if spin.abs() > 0.0 { spin } else { 1.0 };
+        for i in 0..=18 {
+            let t = i as f32 / 18.0;
+            let angle = start_angle + spin * std::f32::consts::TAU * 1.08 * t;
+            path.push(entanglement.center + Vec2::new(angle.cos(), angle.sin()) * loop_radius);
+        }
+        if let Some(&loop_end) = path.last() {
+            joints.push(loop_end);
+        }
     } else if let Some(intersection) = world.spring.intersection {
-        push_coil_instances(
-            instances,
-            anchor,
-            intersection.point,
-            outer,
-            0.54,
-            4.2,
-            10.0,
-        );
-        push_coil_instances(instances, intersection.point, ball, outer, 0.68, 4.8, 13.0);
-        instances.push(Instance {
-            center: intersection.point.to_array(),
-            half: [13.0, 13.0],
-            color: [inner.x, inner.y, inner.z, 0.34 * intersection.strength()],
-            softness: 0.9,
-            material: 0.0,
-            roll: [1.0, 0.0, 0.0, 0.0],
-        });
+        path.push(intersection.point);
+        joints.push(intersection.point);
+    }
+
+    let last = path.last().copied().unwrap_or(anchor);
+    let ball_joint = ball_band_attach(ball, last, world.ball.radius);
+    path.push(ball_joint);
+    joints.push(ball_joint);
+
+    let stretch = anchor.distance(ball).max(1.0) / world.spring.rest_length.max(1.0);
+    let radius = (8.8 / stretch.sqrt()).clamp(4.8, 10.5);
+    let primary = Vec4::new(0.015, 0.05, 0.10, 1.0).lerp(world.config.color_outer, 0.78);
+    let accent = Vec4::new(0.85, 0.96, 1.0, 1.0).lerp(world.config.color_inner, 0.72);
+    mesh.rebuild(&path, &joints, primary, accent, radius);
+}
+
+fn ball_band_attach(ball: Vec2, from: Vec2, radius: f32) -> Vec2 {
+    let dir = (from - ball).normalize_or_zero();
+    if dir.length_squared() > 0.0 {
+        ball + dir * radius * 0.88
     } else {
-        push_coil_instances(instances, anchor, ball, outer, 0.62, 4.5, 12.0);
-    }
-}
-
-fn push_coil_instances(
-    instances: &mut Vec<Instance>,
-    start: Vec2,
-    end: Vec2,
-    color: Vec4,
-    alpha: f32,
-    dot_radius: f32,
-    wave_radius: f32,
-) {
-    let delta = end - start;
-    let len = delta.length();
-    if len <= 1.0 {
-        return;
-    }
-
-    let dir = delta / len;
-    let normal = Vec2::new(-dir.y, dir.x);
-    let coils = (len / 34.0).round().clamp(6.0, 22.0);
-    let segments = (coils as usize * 8).max(2);
-
-    for i in 0..=segments {
-        let t = i as f32 / segments as f32;
-        let base = start + delta * t;
-        let end_fade = (t * (1.0 - t) * 4.0).clamp(0.0, 1.0);
-        let wave = (t * coils * std::f32::consts::TAU).sin() * wave_radius * end_fade;
-        let pos = base + normal * wave;
-        instances.push(Instance {
-            center: pos.to_array(),
-            half: [dot_radius, dot_radius],
-            color: [color.x, color.y, color.z, alpha],
-            softness: 0.7,
-            material: 0.0,
-            roll: [1.0, 0.0, 0.0, 0.0],
-        });
-    }
-}
-
-fn push_entangle_loop(
-    instances: &mut Vec<Instance>,
-    center: Vec2,
-    radius: f32,
-    inner: Vec4,
-    outer: Vec4,
-) {
-    let loop_radius = radius.clamp(46.0, 96.0);
-    for i in 0..28 {
-        let t = i as f32 / 28.0;
-        let angle = t * std::f32::consts::TAU;
-        let pos = center + Vec2::new(angle.cos(), angle.sin()) * loop_radius;
-        let color = if i % 2 == 0 { inner } else { outer };
-        instances.push(Instance {
-            center: pos.to_array(),
-            half: [3.8, 3.8],
-            color: [color.x, color.y, color.z, 0.58],
-            softness: 0.72,
-            material: 0.0,
-            roll: [1.0, 0.0, 0.0, 0.0],
-        });
+        ball
     }
 }

@@ -28,12 +28,12 @@ and renderer are deliberately platform independent so they can be reused there.
 - Run the GUI app: `cargo run -p fidget-vk` (or `./target/release/fidget-vk`).
 
 In-app controls: left-drag to grab/throw the ball, pass the cursor near the
-spring to displace it, sweep quickly across the spring to briefly entangle it,
-right-click or `C` to cut/recall the spring, `N` to fling it in a random
+rubber band to displace it, sweep quickly across the rubber band to briefly entangle it,
+right-click or `C` to cut/recall the rubber band, `N` to fling it in a random
 direction, `G` to toggle gravity, `H` to show/hide the egui parameter HUD,
-`R`/`Space` to reset, `Esc` to quit. The HUD exposes gravity, string
+`R`/`Space` to reset, `Esc` to quit. The HUD exposes gravity, rubber
 elasticity/stiffness, damping, and hook Y offset, including explicit Hook higher
-/ Hook lower buttons; negative hook offset places the string hook off-screen
+/ Hook lower buttons; negative hook offset places the rubber-band hook off-screen
 above the desktop.
 
 ## Cursor Cloud specific instructions

@@ -12,7 +12,14 @@ fn main() {
     let shader_dir = Path::new(&manifest_dir).join("../../shaders");
     let asset_dir = Path::new(&manifest_dir).join("../../assets");
 
-    let shaders = ["blob.vert", "blob.frag", "ball_mesh.vert", "ball_mesh.frag"];
+    let shaders = [
+        "blob.vert",
+        "blob.frag",
+        "ball_mesh.vert",
+        "ball_mesh.frag",
+        "rubber_mesh.vert",
+        "rubber_mesh.frag",
+    ];
     let validator =
         std::env::var("GLSLANG_VALIDATOR").unwrap_or_else(|_| "glslangValidator".to_string());
 
