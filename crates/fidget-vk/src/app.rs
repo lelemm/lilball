@@ -114,7 +114,7 @@ impl App {
             }
         }
 
-        // Ball: glow halo, outer body, inner core, specular highlight.
+        // Ball: faint glow halo plus matte textured body.
         let ball = &world.ball;
         let s = ball.squash_scale(cfg.max_speed);
         let v = ball.vel;
@@ -124,14 +124,13 @@ impl App {
             (s.y, s.x)
         };
         let r = ball.radius;
-        let inner = cfg.color_inner;
         let outer = cfg.color_outer;
         let c = ball.pos.to_array();
 
         self.instances.push(Instance {
             center: c,
             half: [r * 2.4 * sx, r * 2.4 * sy],
-            color: [outer.x, outer.y, outer.z, 0.16],
+            color: [outer.x, outer.y, outer.z, 0.08],
             softness: 1.0,
             material: 0.0,
             _pad: [0.0; 2],
@@ -142,23 +141,6 @@ impl App {
             color: [1.0, 1.0, 1.0, 1.0],
             softness: 0.08,
             material: 1.0,
-            _pad: [0.0; 2],
-        });
-        self.instances.push(Instance {
-            center: c,
-            half: [r * 1.1 * sx, r * 1.1 * sy],
-            color: [inner.x, inner.y, inner.z, 0.18],
-            softness: 0.82,
-            material: 0.0,
-            _pad: [0.0; 2],
-        });
-        let hl = ball.pos + Vec2::new(-0.32, -0.36) * r;
-        self.instances.push(Instance {
-            center: hl.to_array(),
-            half: [r * 0.3, r * 0.3],
-            color: [1.0, 1.0, 1.0, 0.7],
-            softness: 0.6,
-            material: 0.0,
             _pad: [0.0; 2],
         });
     }
