@@ -85,7 +85,7 @@ impl App {
                     color: [col.x, col.y, col.z, a * 0.35],
                     softness: 1.0,
                     material: 0.0,
-                    _pad: [0.0; 2],
+                    roll: [1.0, 0.0, 0.0, 0.0],
                 });
             }
         }
@@ -109,7 +109,7 @@ impl App {
                     color: [base.x, base.y, base.z, lf * base.w * 0.9],
                     softness: 0.85,
                     material: 0.0,
-                    _pad: [0.0; 2],
+                    roll: [1.0, 0.0, 0.0, 0.0],
                 });
             }
         }
@@ -118,30 +118,31 @@ impl App {
         let ball = &world.ball;
         let s = ball.squash_scale(cfg.max_speed);
         let v = ball.vel;
-        let (sx, sy) = if v.x.abs() >= v.y.abs() {
-            (s.x, s.y)
+        let roll_dir = if v.length_squared() > 1.0 {
+            v.normalize()
         } else {
-            (s.y, s.x)
+            ball.roll_dir
         };
         let r = ball.radius;
         let outer = cfg.color_outer;
         let c = ball.pos.to_array();
+        let roll = [roll_dir.x, roll_dir.y, ball.roll_angle, 0.0];
 
         self.instances.push(Instance {
             center: c,
-            half: [r * 2.4 * sx, r * 2.4 * sy],
+            half: [r * 2.4 * s.x, r * 2.4 * s.y],
             color: [outer.x, outer.y, outer.z, 0.08],
             softness: 1.0,
             material: 0.0,
-            _pad: [0.0; 2],
+            roll,
         });
         self.instances.push(Instance {
             center: c,
-            half: [r * 1.05 * sx, r * 1.05 * sy],
+            half: [r * 1.05 * s.x, r * 1.05 * s.y],
             color: [1.0, 1.0, 1.0, 1.0],
             softness: 0.08,
             material: 1.0,
-            _pad: [0.0; 2],
+            roll,
         });
     }
 
@@ -530,7 +531,7 @@ fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
         color: [inner.x, inner.y, inner.z, 0.85],
         softness: 0.75,
         material: 0.0,
-        _pad: [0.0; 2],
+        roll: [1.0, 0.0, 0.0, 0.0],
     });
 
     if let Some(entanglement) = world.spring.entanglement {
@@ -560,7 +561,7 @@ fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
             color: [inner.x, inner.y, inner.z, 0.34 * intersection.strength()],
             softness: 0.9,
             material: 0.0,
-            _pad: [0.0; 2],
+            roll: [1.0, 0.0, 0.0, 0.0],
         });
     } else {
         push_coil_instances(instances, anchor, ball, outer, 0.62, 4.5, 12.0);
@@ -599,7 +600,7 @@ fn push_coil_instances(
             color: [color.x, color.y, color.z, alpha],
             softness: 0.7,
             material: 0.0,
-            _pad: [0.0; 2],
+            roll: [1.0, 0.0, 0.0, 0.0],
         });
     }
 }
@@ -623,7 +624,7 @@ fn push_entangle_loop(
             color: [color.x, color.y, color.z, 0.58],
             softness: 0.72,
             material: 0.0,
-            _pad: [0.0; 2],
+            roll: [1.0, 0.0, 0.0, 0.0],
         });
     }
 }

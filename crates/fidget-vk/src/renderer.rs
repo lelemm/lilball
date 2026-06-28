@@ -8,7 +8,7 @@
 
 use std::ffi::CStr;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ash::vk;
 use egui::{ClippedPrimitive, TextureId, TexturesDelta};
 use egui_ash_renderer::{Options as EguiRendererOptions, Renderer as EguiRenderer};
@@ -23,7 +23,8 @@ pub struct Instance {
     pub color: [f32; 4],
     pub softness: f32,
     pub material: f32,
-    pub _pad: [f32; 2],
+    /// xy = stretch/roll axis, z = visual roll angle in radians.
+    pub roll: [f32; 4],
 }
 
 pub struct EguiDrawData<'a> {
@@ -827,6 +828,11 @@ fn create_pipeline(
             .binding(1)
             .format(vk::Format::R32_SFLOAT)
             .offset(36),
+        vk::VertexInputAttributeDescription::default()
+            .location(6)
+            .binding(1)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(40),
     ];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&bindings)

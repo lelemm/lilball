@@ -1,6 +1,6 @@
 use approx::assert_relative_eq;
 use fidget_sim::{
-    Ball, Bounds, InteractionState, ParticleSystem, Trail, World, WorldConfig, FIXED_DT,
+    Ball, Bounds, FIXED_DT, InteractionState, ParticleSystem, Trail, World, WorldConfig,
 };
 use glam::{Vec2, Vec4};
 
@@ -354,6 +354,33 @@ fn nudge_launches_ball_at_speed() {
     world.nudge(2800.0);
     assert_relative_eq!(world.ball.speed(), 2800.0, epsilon = 1.0);
     assert!(!world.ball.asleep);
+}
+
+#[test]
+fn ball_rolls_by_distance_travelled() {
+    let mut ball = Ball::new(Vec2::ZERO, 10.0);
+
+    ball.roll_by(Vec2::new(10.0, 0.0));
+    assert_relative_eq!(ball.roll_angle, 1.0, epsilon = 0.001);
+    assert_relative_eq!(ball.roll_dir.x, 1.0, epsilon = 0.001);
+    assert_relative_eq!(ball.roll_dir.y, 0.0, epsilon = 0.001);
+
+    ball.roll_by(Vec2::new(0.0, 5.0));
+    assert_relative_eq!(ball.roll_angle, 1.5, epsilon = 0.001);
+    assert_relative_eq!(ball.roll_dir.x, 0.0, epsilon = 0.001);
+    assert_relative_eq!(ball.roll_dir.y, 1.0, epsilon = 0.001);
+}
+
+#[test]
+fn world_advances_ball_roll_with_motion() {
+    let mut world = no_gravity_world();
+    world.ball.vel = Vec2::new(600.0, 0.0);
+
+    world.advance(FIXED_DT);
+
+    assert!(world.ball.roll_angle > 0.0);
+    assert_relative_eq!(world.ball.roll_dir.x, 1.0, epsilon = 0.001);
+    assert_relative_eq!(world.ball.roll_dir.y, 0.0, epsilon = 0.001);
 }
 
 #[test]
