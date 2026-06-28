@@ -12,6 +12,7 @@ use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::platform::x11::{WindowAttributesExtX11, WindowType};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use fidget_sim::{Bounds, ParticleKind, World};
@@ -200,7 +201,9 @@ impl ApplicationHandler for App {
             .with_inner_size(overlay.size)
             .with_transparent(true)
             .with_decorations(false)
-            .with_window_level(WindowLevel::AlwaysOnTop);
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_override_redirect(true)
+            .with_x11_window_type(vec![WindowType::Dock]);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => w,
             Err(e) => {
