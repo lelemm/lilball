@@ -24,7 +24,7 @@ impl SpringState {
             stiffness: 85.0,
             damping: 20.0,
             max_force: 18_000.0,
-            recall_margin: 180.0,
+            recall_margin: 900.0,
             attached: true,
         }
     }
