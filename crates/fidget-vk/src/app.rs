@@ -171,7 +171,7 @@ impl App {
         };
         self.world.advance(dt);
 
-        let egui_output = if self.hud_visible {
+        let egui_output = {
             let raw_input = {
                 let window = self.window.as_ref().expect("window exists while redrawing");
                 self.egui_state
@@ -195,8 +195,6 @@ impl App {
                 clipped_primitives,
                 pixels_per_point,
             ))
-        } else {
-            None
         };
 
         self.build_instances();
@@ -240,11 +238,27 @@ impl App {
     }
 
     fn show_hud(&mut self, ctx: &egui::Context) {
+        if !self.hud_visible {
+            egui::Area::new("hud_toggle".into())
+                .fixed_pos(egui::pos2(18.0, 18.0))
+                .show(ctx, |ui| {
+                    if ui.button("HUD").clicked() {
+                        self.hud_visible = true;
+                    }
+                });
+            return;
+        }
+
         egui::Window::new("Fidget controls")
             .default_pos(egui::pos2(18.0, 18.0))
             .default_width(290.0)
             .show(ctx, |ui| {
-                ui.label("H toggles this HUD");
+                ui.horizontal(|ui| {
+                    ui.label("H toggles this HUD");
+                    if ui.button("Hide").clicked() {
+                        self.hud_visible = false;
+                    }
+                });
                 ui.separator();
 
                 let mut gravity = self.world.gravity_strength();
@@ -367,14 +381,10 @@ impl ApplicationHandler for App {
             self.hud_visible = !self.hud_visible;
         }
 
-        let egui_consumed = if self.hud_visible {
-            if let (Some(window), Some(egui_state)) =
-                (self.window.as_ref(), self.egui_state.as_mut())
-            {
-                egui_state.on_window_event(window, &event).consumed
-            } else {
-                false
-            }
+        let egui_consumed = if let (Some(window), Some(egui_state)) =
+            (self.window.as_ref(), self.egui_state.as_mut())
+        {
+            egui_state.on_window_event(window, &event).consumed
         } else {
             false
         };
