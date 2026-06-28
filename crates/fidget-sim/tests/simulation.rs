@@ -147,6 +147,50 @@ fn slow_cursor_sweep_does_not_entangle_spring() {
     world.move_cursor(spring_mid + Vec2::new(30.0, 0.0), 0.25);
 
     assert!(world.spring.entanglement.is_none());
+    assert!(
+        world.spring.intersection.is_some(),
+        "slow cursor pass should still displace the spring"
+    );
+}
+
+#[test]
+fn cursor_intersection_moves_ball_without_entangling() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    world.move_cursor(spring_mid + Vec2::new(-55.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(55.0, 0.0), 0.22);
+    assert!(world.spring.intersection.is_some());
+    assert!(world.spring.entanglement.is_none());
+
+    let x0 = world.ball.pos.x;
+    for _ in 0..24 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        (world.ball.pos.x - x0).abs() > 1.0,
+        "spring deflection should tug the ball sideways, x0={x0}, pos={:?}",
+        world.ball.pos
+    );
+}
+
+#[test]
+fn cutting_displaced_spring_kicks_ball() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    world.move_cursor(spring_mid + Vec2::new(-80.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(80.0, 0.0), 0.32);
+    assert!(world.spring.intersection.is_some());
+    assert!(world.spring.entanglement.is_none());
+
+    world.cut_spring();
+
+    assert!(!world.spring_attached());
+    assert!(
+        world.ball.vel.x.abs() > 50.0,
+        "cutting a displaced spring should transfer cursor/string impulse, vel={:?}",
+        world.ball.vel
+    );
 }
 
 #[test]

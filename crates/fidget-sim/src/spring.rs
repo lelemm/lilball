@@ -24,6 +24,22 @@ impl CursorEntanglement {
     }
 }
 
+/// Brief spring deflection from the cursor brushing or crossing the string.
+#[derive(Debug, Clone, Copy)]
+pub struct CursorIntersection {
+    pub point: Vec2,
+    pub displacement: Vec2,
+    pub cursor_vel: Vec2,
+    pub age: f32,
+    pub max_age: f32,
+}
+
+impl CursorIntersection {
+    pub fn strength(&self) -> f32 {
+        (1.0 - self.age / self.max_age).clamp(0.0, 1.0)
+    }
+}
+
 /// Anchored spring that suspends the ball from the top of the play area.
 #[derive(Debug, Clone, Copy)]
 pub struct SpringState {
@@ -34,7 +50,9 @@ pub struct SpringState {
     pub max_force: f32,
     pub recall_margin: f32,
     pub attached: bool,
+    pub intersection: Option<CursorIntersection>,
     pub entanglement: Option<CursorEntanglement>,
+    pub intersection_capture_radius: f32,
     pub entangle_capture_radius: f32,
     pub entangle_min_cursor_speed: f32,
 }
@@ -50,7 +68,9 @@ impl SpringState {
             max_force: 18_000.0,
             recall_margin: 900.0,
             attached: true,
+            intersection: None,
             entanglement: None,
+            intersection_capture_radius: 110.0,
             entangle_capture_radius: 72.0,
             entangle_min_cursor_speed: 850.0,
         }
@@ -67,11 +87,13 @@ impl SpringState {
 
     pub fn cut(&mut self) {
         self.attached = false;
+        self.intersection = None;
         self.entanglement = None;
     }
 
     pub fn attach(&mut self) {
         self.attached = true;
+        self.intersection = None;
         self.entanglement = None;
     }
 
@@ -91,6 +113,17 @@ impl SpringState {
             return force;
         }
 
+        let mut force = self.base_force_on(ball);
+        if let Some(intersection) = self.intersection {
+            let strength = intersection.strength();
+            force += intersection.displacement * (42.0 * strength);
+            force += intersection.cursor_vel * (0.16 * strength);
+        }
+
+        clamp_force(force, self.max_force)
+    }
+
+    fn base_force_on(&self, ball: &Ball) -> Vec2 {
         let delta = ball.pos - self.anchor;
         let len = delta.length();
         if len <= 1e-4 {
@@ -100,16 +133,70 @@ impl SpringState {
         let dir = delta / len;
         let stretch = len - self.rest_length;
         let radial_speed = ball.vel.dot(dir);
-        let mut force = (-self.stiffness * stretch - self.damping * radial_speed) * dir;
-        let mag = force.length();
-        if mag > self.max_force {
-            force *= self.max_force / mag;
-        }
-        force
+        (-self.stiffness * stretch - self.damping * radial_speed) * dir
     }
 
     pub fn should_recall(&self, ball: &Ball, bounds: Bounds) -> bool {
         !self.attached && ball.pos.y - ball.radius > bounds.bottom + self.recall_margin
+    }
+
+    pub fn cut_impulse(&self) -> Vec2 {
+        let mut impulse = Vec2::ZERO;
+        if let Some(intersection) = self.intersection {
+            let strength = intersection.strength();
+            impulse += intersection.displacement * (4.2 * strength);
+            impulse += intersection.cursor_vel * (0.32 * strength);
+        }
+        if let Some(entanglement) = self.entanglement {
+            impulse += entanglement.tangent_velocity() * 0.55;
+        }
+        clamp_len(impulse, 1800.0)
+    }
+
+    pub fn update_intersection_sweep(
+        &mut self,
+        ball: &Ball,
+        prev_cursor: Vec2,
+        cursor: Vec2,
+        cursor_vel: Vec2,
+    ) -> bool {
+        if !self.attached {
+            return false;
+        }
+
+        let spring_distance = segment_distance(prev_cursor, cursor, self.anchor, ball.pos);
+        let ball_distance = cursor.distance(ball.pos) - ball.radius;
+        let distance = spring_distance.min(ball_distance.max(0.0));
+        if distance > self.intersection_capture_radius {
+            return false;
+        }
+
+        let nearest = nearest_point_on_segment(cursor, self.anchor, ball.pos);
+        let mut displacement = cursor - nearest;
+        if displacement.length_squared() < 1.0 {
+            let spring_dir = (ball.pos - self.anchor).normalize_or_zero();
+            let cursor_dir = cursor_vel.normalize_or_zero();
+            displacement = if cursor_dir.length_squared() > 0.0 {
+                cursor_dir
+            } else {
+                Vec2::new(-spring_dir.y, spring_dir.x)
+            };
+        }
+
+        let proximity = 1.0 - (distance / self.intersection_capture_radius).clamp(0.0, 1.0);
+        let speed_boost = (cursor_vel.length() / 1400.0).clamp(0.25, 1.0);
+        let strength = proximity * speed_boost;
+        let max_displacement = 130.0 * strength.max(0.2);
+        let displacement = displacement.normalize_or_zero() * max_displacement;
+
+        self.intersection = Some(CursorIntersection {
+            point: nearest + displacement * 0.55,
+            displacement,
+            cursor_vel,
+            age: 0.0,
+            max_age: 0.55 + speed_boost * 0.35,
+        });
+        true
     }
 
     pub fn try_entangle(&mut self, ball: &Ball, cursor: Vec2, cursor_vel: Vec2) -> bool {
@@ -166,23 +253,34 @@ impl SpringState {
             age: 0.0,
             max_age,
         });
+        self.intersection = None;
         true
     }
 
-    pub fn update_entanglement(&mut self, cursor: Vec2, dt: f32) {
-        let Some(mut entanglement) = self.entanglement else {
-            return;
-        };
+    pub fn update_transients(&mut self, cursor: Vec2, dt: f32) {
+        if let Some(mut intersection) = self.intersection {
+            intersection.age += dt;
+            intersection.displacement *= (-dt * 4.8).exp();
+            if intersection.age >= intersection.max_age || intersection.displacement.length() < 1.0
+            {
+                self.intersection = None;
+            } else {
+                self.intersection = Some(intersection);
+            }
+        }
 
-        entanglement.center = cursor;
-        entanglement.age += dt;
-        entanglement.angle += entanglement.angular_velocity * dt;
-        entanglement.angular_velocity *= (-dt * 1.15).exp();
+        if let Some(mut entanglement) = self.entanglement {
+            entanglement.center = cursor;
+            entanglement.age += dt;
+            entanglement.angle += entanglement.angular_velocity * dt;
+            entanglement.angular_velocity *= (-dt * 1.15).exp();
 
-        if entanglement.age >= entanglement.max_age || entanglement.angular_velocity.abs() < 1.4 {
-            self.entanglement = None;
-        } else {
-            self.entanglement = Some(entanglement);
+            if entanglement.age >= entanglement.max_age || entanglement.angular_velocity.abs() < 1.4
+            {
+                self.entanglement = None;
+            } else {
+                self.entanglement = Some(entanglement);
+            }
         }
     }
 }
@@ -193,13 +291,17 @@ fn anchor_for(bounds: Bounds) -> Vec2 {
 }
 
 fn distance_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    p.distance(nearest_point_on_segment(p, a, b))
+}
+
+fn nearest_point_on_segment(p: Vec2, a: Vec2, b: Vec2) -> Vec2 {
     let ab = b - a;
     let denom = ab.length_squared();
     if denom <= 1e-4 {
-        return p.distance(a);
+        return a;
     }
     let t = (p - a).dot(ab) / denom;
-    p.distance(a + ab * t.clamp(0.0, 1.0))
+    a + ab * t.clamp(0.0, 1.0)
 }
 
 fn segment_distance(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> f32 {
@@ -225,4 +327,17 @@ fn segments_intersect(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> bool {
     let t = delta.perp_dot(b) / denom;
     let u = delta.perp_dot(a) / denom;
     (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)
+}
+
+fn clamp_force(force: Vec2, max: f32) -> Vec2 {
+    clamp_len(force, max)
+}
+
+fn clamp_len(v: Vec2, max: f32) -> Vec2 {
+    let len = v.length();
+    if len > max && len > 0.0 {
+        v * (max / len)
+    } else {
+        v
+    }
 }

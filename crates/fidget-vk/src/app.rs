@@ -210,7 +210,7 @@ impl ApplicationHandler for App {
                 self.window = Some(window);
                 self.last_frame = Instant::now();
                 log::info!(
-                    "Fidget-VK is running. Drag the ball; right-click or C=cut/recall spring, N=fling, R=reset, G=gravity, Esc=quit"
+                    "Fidget-VK is running. Drag the ball; brush/sweep the spring to displace or entangle it; right-click or C=cut/recall spring, N=fling, R=reset, G=gravity, Esc=quit"
                 );
             }
             Err(e) => {
@@ -313,6 +313,24 @@ fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
             inner,
             outer,
         );
+    } else if let Some(intersection) = world.spring.intersection {
+        push_coil_instances(
+            instances,
+            anchor,
+            intersection.point,
+            outer,
+            0.54,
+            4.2,
+            10.0,
+        );
+        push_coil_instances(instances, intersection.point, ball, outer, 0.68, 4.8, 13.0);
+        instances.push(Instance {
+            center: intersection.point.to_array(),
+            half: [13.0, 13.0],
+            color: [inner.x, inner.y, inner.z, 0.34 * intersection.strength()],
+            softness: 0.9,
+            _pad: [0.0; 3],
+        });
     } else {
         push_coil_instances(instances, anchor, ball, outer, 0.62, 4.5, 12.0);
     }

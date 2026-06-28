@@ -118,7 +118,9 @@ impl World {
     /// Cut the anchor spring so gravity can pull the ball out of the bottom of
     /// the play area.
     pub fn cut_spring(&mut self) {
+        let cut_impulse = self.spring.cut_impulse();
         self.spring.cut();
+        self.ball.vel += cut_impulse;
         self.ball.wake();
     }
 
@@ -187,14 +189,29 @@ impl World {
         self.cursor = cursor;
         if self.ball.grabbed {
             self.interaction.update_cursor(cursor, now);
-        } else if self
-            .spring
-            .try_entangle_sweep(&self.ball, prev_cursor, cursor, self.cursor_vel)
-        {
-            self.ball.wake();
+        } else {
+            let displaced = self.spring.update_intersection_sweep(
+                &self.ball,
+                prev_cursor,
+                cursor,
+                self.cursor_vel,
+            );
+            let entangled =
+                self.spring
+                    .try_entangle_sweep(&self.ball, prev_cursor, cursor, self.cursor_vel);
+            if displaced || entangled {
+                self.ball.wake();
+            }
             if self.config.particles_enabled {
-                self.particles
-                    .emit_motes(cursor, self.cursor_vel, 10, self.config.color_outer);
+                let count = if entangled { 10 } else { 3 };
+                if displaced || entangled {
+                    self.particles.emit_motes(
+                        cursor,
+                        self.cursor_vel,
+                        count,
+                        self.config.color_outer,
+                    );
+                }
             }
         }
     }
@@ -236,7 +253,7 @@ impl World {
             self.interaction
                 .apply_spring(&mut self.ball, self.cursor, dt);
         } else if !self.ball.asleep {
-            self.spring.update_entanglement(self.cursor, dt);
+            self.spring.update_transients(self.cursor, dt);
             // Integrate gravity, the anchored spring, and drag.
             let spring_force = self.spring.force_on(&self.ball);
             self.ball.vel += (self.config.gravity + spring_force / self.ball.mass) * dt;
@@ -313,6 +330,7 @@ impl World {
     /// Whether anything is visibly animating (used for idle frame pacing).
     pub fn is_active(&self) -> bool {
         self.ball.grabbed
+            || self.spring.intersection.is_some()
             || self.spring.entanglement.is_some()
             || !self.ball.asleep
             || !self.particles.is_empty()
