@@ -26,9 +26,9 @@ independent so they can be reused there.
 - Headless physics demo (no GPU needed): `cargo run -p fidget-sim --bin sim_demo`.
 - Run the GUI app: `cargo run -p fidget-vk` (or `./target/release/fidget-vk`).
 
-In-app controls: left-drag to grab/throw the ball, `C` to cut/recall the spring,
-`N` to fling it in a random direction, `G` to toggle gravity, `R`/`Space` to
-reset, `Esc` to quit.
+In-app controls: left-drag to grab/throw the ball, right-click or `C` to
+cut/recall the spring, `N` to fling it in a random direction, `G` to toggle
+gravity, `R`/`Space` to reset, `Esc` to quit.
 
 ## Cursor Cloud specific instructions
 

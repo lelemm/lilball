@@ -210,7 +210,7 @@ impl ApplicationHandler for App {
                 self.window = Some(window);
                 self.last_frame = Instant::now();
                 log::info!(
-                    "Fidget-VK is running. Drag the ball; keys: C=cut/recall spring, N=fling, R=reset, G=gravity, Esc=quit"
+                    "Fidget-VK is running. Drag the ball; right-click or C=cut/recall spring, N=fling, R=reset, G=gravity, Esc=quit"
                 );
             }
             Err(e) => {
@@ -246,6 +246,8 @@ impl ApplicationHandler for App {
                             self.world.release(now);
                         }
                     }
+                } else if button == MouseButton::Right && state == ElementState::Pressed {
+                    self.world.toggle_spring();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
