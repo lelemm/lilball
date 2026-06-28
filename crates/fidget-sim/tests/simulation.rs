@@ -1,5 +1,7 @@
 use approx::assert_relative_eq;
-use fidget_sim::{Ball, Bounds, InteractionState, ParticleSystem, Trail, World, WorldConfig, FIXED_DT};
+use fidget_sim::{
+    Ball, Bounds, InteractionState, ParticleSystem, Trail, World, WorldConfig, FIXED_DT,
+};
 use glam::{Vec2, Vec4};
 
 fn no_gravity_world() -> World {
@@ -32,7 +34,10 @@ fn ball_bounces_off_right_wall_and_reverses() {
             break;
         }
     }
-    assert!(bounced, "ball should reverse x velocity after hitting right wall");
+    assert!(
+        bounced,
+        "ball should reverse x velocity after hitting right wall"
+    );
     // Energy lost to restitution => speed reduced.
     assert!(world.ball.speed() <= 2000.0 * restitution + 1.0);
 }
@@ -53,15 +58,189 @@ fn ball_never_escapes_bounds() {
 
 #[test]
 fn gravity_pulls_ball_down() {
-    let mut world = World::new(WorldConfig::default(), Bounds::new(0.0, 0.0, 1000.0, 6000.0));
+    let mut world = World::new(
+        WorldConfig::default(),
+        Bounds::new(0.0, 0.0, 1000.0, 6000.0),
+    );
     world.ball.pos = Vec2::new(500.0, 100.0);
     world.ball.vel = Vec2::ZERO;
     let y0 = world.ball.pos.y;
     for _ in 0..30 {
         world.advance(FIXED_DT);
     }
-    assert!(world.ball.pos.y > y0, "gravity should increase y (downward)");
+    assert!(
+        world.ball.pos.y > y0,
+        "gravity should increase y (downward)"
+    );
     assert!(world.ball.vel.y > 0.0);
+}
+
+#[test]
+fn attached_spring_pulls_ball_toward_rest_position() {
+    let mut world = no_gravity_world();
+    let rest = world.spring.rest_position();
+    world.ball.pos = rest + Vec2::new(0.0, 160.0);
+    world.ball.vel = Vec2::ZERO;
+
+    world.advance(FIXED_DT);
+
+    assert!(world.spring_attached());
+    assert!(
+        world.ball.vel.y < 0.0,
+        "spring should pull upward when stretched below rest, vel={:?}",
+        world.ball.vel
+    );
+}
+
+#[test]
+fn cut_spring_lets_ball_fall_through_bottom() {
+    let mut world = World::new(WorldConfig::default(), Bounds::new(0.0, 0.0, 1000.0, 600.0));
+    let r = world.ball.radius;
+    world.cut_spring();
+    world.ball.pos = Vec2::new(500.0, world.bounds.bottom - r - 1.0);
+    world.ball.vel = Vec2::new(0.0, 900.0);
+
+    for _ in 0..8 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(!world.spring_attached());
+    assert!(
+        world.ball.pos.y + r > world.bounds.bottom,
+        "cut spring should disable the bottom wall, pos={:?}",
+        world.ball.pos
+    );
+}
+
+#[test]
+fn fallen_ball_recalls_to_spring() {
+    let mut world = World::new(WorldConfig::default(), Bounds::new(0.0, 0.0, 1000.0, 600.0));
+    world.cut_spring();
+    world.ball.pos = Vec2::new(
+        500.0,
+        world.bounds.bottom + world.spring.recall_margin + world.ball.radius + 2.0,
+    );
+    world.ball.vel = Vec2::new(0.0, 1200.0);
+
+    world.advance(FIXED_DT);
+
+    assert!(world.spring_attached());
+    assert_relative_eq!(
+        world.ball.pos.x,
+        world.spring.rest_position().x,
+        epsilon = 0.01
+    );
+    assert_relative_eq!(
+        world.ball.pos.y,
+        world.spring.rest_position().y,
+        epsilon = 0.01
+    );
+    assert_relative_eq!(world.ball.vel.length(), 0.0, epsilon = 0.01);
+}
+
+#[test]
+fn slow_cursor_sweep_does_not_entangle_spring() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid + Vec2::new(-30.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(30.0, 0.0), 0.25);
+
+    assert!(world.spring.entanglement.is_none());
+    assert!(
+        world.spring.intersection.is_some(),
+        "slow cursor pass should still displace the spring"
+    );
+}
+
+#[test]
+fn cursor_intersection_moves_ball_without_entangling() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    world.move_cursor(spring_mid + Vec2::new(-55.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(55.0, 0.0), 0.22);
+    assert!(world.spring.intersection.is_some());
+    assert!(world.spring.entanglement.is_none());
+
+    let x0 = world.ball.pos.x;
+    for _ in 0..24 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        (world.ball.pos.x - x0).abs() > 1.0,
+        "spring deflection should tug the ball sideways, x0={x0}, pos={:?}",
+        world.ball.pos
+    );
+}
+
+#[test]
+fn cutting_displaced_spring_kicks_ball() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    world.move_cursor(spring_mid + Vec2::new(-80.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(80.0, 0.0), 0.32);
+    assert!(world.spring.intersection.is_some());
+    assert!(world.spring.entanglement.is_none());
+
+    world.cut_spring();
+
+    assert!(!world.spring_attached());
+    assert!(
+        world.ball.vel.x.abs() > 50.0,
+        "cutting a displaced spring should transfer cursor/string impulse, vel={:?}",
+        world.ball.vel
+    );
+}
+
+#[test]
+fn fast_cursor_sweep_entangles_spring() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid + Vec2::new(-140.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(140.0, 0.0), 0.04);
+
+    assert!(
+        world.spring.entanglement.is_some(),
+        "fast cursor inertia near the spring should snag it"
+    );
+}
+
+#[test]
+fn entanglement_pushes_ball_around_cursor() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    world.move_cursor(spring_mid + Vec2::new(-140.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(140.0, 0.0), 0.04);
+
+    let x0 = world.ball.pos.x;
+    for _ in 0..30 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(world.spring.entanglement.is_some());
+    assert!(
+        (world.ball.pos.x - x0).abs() > 6.0,
+        "entangled ball should orbit laterally, x0={x0}, pos={:?}",
+        world.ball.pos
+    );
+}
+
+#[test]
+fn cursor_entanglement_expires() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    world.move_cursor(spring_mid + Vec2::new(-140.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(140.0, 0.0), 0.04);
+    assert!(world.spring.entanglement.is_some());
+
+    for _ in 0..360 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(world.spring.entanglement.is_none());
+    assert!(world.spring_attached());
 }
 
 #[test]
