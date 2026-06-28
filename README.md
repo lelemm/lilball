@@ -1,8 +1,8 @@
 # Fidget-VK
 
 Fidget-VK is a Vulkan-rendered desktop fidget toy: a textured ball hanging from
-a spring that can be dragged, thrown, cut loose, recalled, and tangled with the
-cursor.
+a rubber band that can be dragged, thrown, cut loose, recalled, and tangled with
+the cursor.
 
 The current app is a Linux transparent overlay preview built with Rust, winit,
 ash/Vulkan, and egui. It also builds as a Windows preview executable, but the
@@ -28,15 +28,15 @@ native overlay behavior) is still planned.
 - Full-desktop transparent Linux overlay preview.
 - Vulkan rendering through `ash`.
 - Image-backed soccer ball material with shader lighting and seam relief.
-- Spring physics with gravity, damping, elasticity, and off-screen hook support.
-- Cursor/string intersection that bends the spring and pushes the ball.
-- Fast cursor sweeps can create temporary spring entanglement.
-- Cut/recall behavior: release the ball, let it fall, then recall it to the spring.
+- Rubber-band physics with gravity, damping, elasticity, and off-screen hook support.
+- Cursor/rubber-band intersection that bends the band and pushes the ball.
+- Fast cursor sweeps can create temporary rubber-band entanglement.
+- Cut/recall behavior: release the ball, let it fall, then recall it to the rubber band.
 - Motion trails, particles, impact sparks, squash/stretch, and glow.
 - egui HUD for runtime tuning:
   - gravity
-  - string elasticity/stiffness
-  - string damping
+  - rubber elasticity/stiffness
+  - rubber damping
   - hook Y offset
   - reset
   - cut/recall
@@ -46,9 +46,9 @@ native overlay behavior) is still planned.
 ## Controls
 
 - Left drag: grab/throw the ball.
-- Move cursor near string: displace the spring.
-- Fast cursor sweep across string: temporary entanglement.
-- Right click or `C`: cut/recall the spring.
+- Move cursor near rubber band: displace the band.
+- Fast cursor sweep across rubber band: temporary entanglement.
+- Right click or `C`: cut/recall the rubber band.
 - `N`: fling the ball.
 - `G`: toggle gravity.
 - `H`: show/hide the HUD.
