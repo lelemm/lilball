@@ -314,13 +314,15 @@ impl App {
                 let old_hook = self.world.hook_offset_y();
                 let mut hook = old_hook;
                 ui.horizontal(|ui| {
-                    if ui.button("up").clicked() {
+                    if ui.button("Hook higher").clicked() {
                         hook -= 60.0;
                     }
-                    ui.add(egui::Slider::new(&mut hook, -600.0..=260.0).text("hook y offset"));
-                    if ui.button("down").clicked() {
+                    if ui.button("Hook lower").clicked() {
                         hook += 60.0;
                     }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::Slider::new(&mut hook, -600.0..=260.0).text("hook y offset"));
                 });
                 if (hook - old_hook).abs() > f32::EPSILON {
                     self.world.set_hook_offset_y(hook);
