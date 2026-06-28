@@ -5,6 +5,7 @@ use crate::bounds::Bounds;
 use crate::collisions;
 use crate::interaction::InteractionState;
 use crate::particles::ParticleSystem;
+use crate::spring::SpringState;
 use crate::trail::Trail;
 use crate::FIXED_DT;
 
@@ -59,6 +60,7 @@ pub struct World {
     pub trail: Trail,
     pub particles: ParticleSystem,
     pub interaction: InteractionState,
+    pub spring: SpringState,
 
     accumulator: f32,
     cursor: Vec2,
@@ -69,6 +71,7 @@ pub struct World {
 impl World {
     pub fn new(config: WorldConfig, bounds: Bounds) -> Self {
         let ball = Ball::new(bounds.center(), 42.0);
+        let spring = SpringState::new(bounds, ball.pos);
         let particles = ParticleSystem::new(config.max_particles);
         let trail = Trail::new(64, 0.45);
         Self {
@@ -79,6 +82,7 @@ impl World {
             trail,
             particles,
             interaction: InteractionState::default(),
+            spring,
             accumulator: 0.0,
             mote_accum: 0.0,
             nudge_seed: 0x9E37_79B9,
@@ -92,20 +96,49 @@ impl World {
             .nudge_seed
             .wrapping_mul(1_664_525)
             .wrapping_add(1_013_904_223);
-        let angle = (self.nudge_seed >> 8) as f32 / (1u32 << 24) as f32
-            * std::f32::consts::TAU;
+        let angle = (self.nudge_seed >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU;
         self.ball.vel = Vec2::new(angle.cos(), angle.sin()) * speed;
         self.ball.wake();
     }
 
     pub fn set_bounds(&mut self, bounds: Bounds) {
         self.bounds = bounds;
+        self.spring.set_bounds(bounds);
     }
 
-    /// Reset the ball to the centre, at rest.
+    /// Reset the ball onto the intact spring, at rest.
     pub fn reset(&mut self) {
+        self.recall_to_spring();
+    }
+
+    /// Cut the anchor spring so gravity can pull the ball out of the bottom of
+    /// the play area.
+    pub fn cut_spring(&mut self) {
+        self.spring.cut();
+        self.ball.wake();
+    }
+
+    /// Reattach the spring and recall the ball to its hanging rest position.
+    pub fn attach_spring(&mut self) {
+        self.recall_to_spring();
+    }
+
+    pub fn toggle_spring(&mut self) {
+        if self.spring.attached {
+            self.cut_spring();
+        } else {
+            self.attach_spring();
+        }
+    }
+
+    pub fn spring_attached(&self) -> bool {
+        self.spring.attached
+    }
+
+    fn recall_to_spring(&mut self) {
         let r = self.ball.radius;
-        self.ball = Ball::new(self.bounds.center(), r);
+        self.spring.attach();
+        self.ball = Ball::new(self.spring.rest_position(), r);
         self.trail.clear();
     }
 
@@ -147,8 +180,11 @@ impl World {
         if self.ball.grabbed {
             self.interaction.release(&mut self.ball, now);
             if self.config.particles_enabled {
-                self.particles
-                    .emit_burst(self.ball.pos, self.ball.speed(), self.config.color_outer);
+                self.particles.emit_burst(
+                    self.ball.pos,
+                    self.ball.speed(),
+                    self.config.color_outer,
+                );
             }
         }
     }
@@ -174,10 +210,12 @@ impl World {
 
     fn step(&mut self, dt: f32) {
         if self.ball.grabbed {
-            self.interaction.apply_spring(&mut self.ball, self.cursor, dt);
+            self.interaction
+                .apply_spring(&mut self.ball, self.cursor, dt);
         } else if !self.ball.asleep {
-            // Integrate gravity + drag.
-            self.ball.vel += self.config.gravity * dt;
+            // Integrate gravity, the anchored spring, and drag.
+            let spring_force = self.spring.force_on(&self.ball);
+            self.ball.vel += (self.config.gravity + spring_force / self.ball.mass) * dt;
             self.ball.vel *= 1.0 - self.config.air_drag * dt;
             // Clamp speed.
             let sp = self.ball.vel.length();
@@ -191,12 +229,20 @@ impl World {
         self.ball.squash_impulse *= (-dt * 14.0).exp();
 
         // Resolve walls and emit impact sparks.
-        let impacts = collisions::resolve_walls(&mut self.ball, &self.bounds);
+        let impacts = collisions::resolve_walls_with_bottom(
+            &mut self.ball,
+            &self.bounds,
+            self.spring.attached,
+        );
         if self.config.particles_enabled {
             for im in &impacts {
                 if im.speed > 60.0 {
-                    self.particles
-                        .emit_impact(im.point, im.normal, im.speed, self.config.color_outer);
+                    self.particles.emit_impact(
+                        im.point,
+                        im.normal,
+                        im.speed,
+                        self.config.color_outer,
+                    );
                 }
             }
         }
@@ -211,11 +257,19 @@ impl World {
             if speed > 200.0 {
                 self.mote_accum += speed * dt;
                 while self.mote_accum > 400.0 {
-                    self.particles
-                        .emit_motes(self.ball.pos, self.ball.vel, 1, self.config.color_inner);
+                    self.particles.emit_motes(
+                        self.ball.pos,
+                        self.ball.vel,
+                        1,
+                        self.config.color_inner,
+                    );
                     self.mote_accum -= 400.0;
                 }
             }
+        }
+
+        if self.spring.should_recall(&self.ball, self.bounds) {
+            self.recall_to_spring();
         }
 
         // Sleep handling: stop integrating when at rest with no interaction.

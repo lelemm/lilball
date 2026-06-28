@@ -74,6 +74,10 @@ impl App {
             }
         }
 
+        if world.spring.attached {
+            push_spring_instances(&mut self.instances, world);
+        }
+
         // Particles.
         if cfg.particles_enabled {
             for p in world.particles.iter() {
@@ -161,8 +165,12 @@ impl App {
                         log::error!("swapchain recreation failed: {e}");
                         event_loop.exit();
                     }
-                    self.world
-                        .set_bounds(Bounds::new(0.0, 0.0, size.width as f32, size.height as f32));
+                    self.world.set_bounds(Bounds::new(
+                        0.0,
+                        0.0,
+                        size.width as f32,
+                        size.height as f32,
+                    ));
                 }
             }
             Err(e) => {
@@ -201,7 +209,9 @@ impl ApplicationHandler for App {
                 self.renderer = Some(renderer);
                 self.window = Some(window);
                 self.last_frame = Instant::now();
-                log::info!("Fidget-VK is running. Drag the ball; keys: N=fling, R=reset, G=gravity, Esc=quit");
+                log::info!(
+                    "Fidget-VK is running. Drag the ball; keys: C=cut/recall spring, N=fling, R=reset, G=gravity, Esc=quit"
+                );
             }
             Err(e) => {
                 log::error!("failed to initialise renderer: {e}");
@@ -210,12 +220,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -250,6 +255,7 @@ impl ApplicationHandler for App {
                         PhysicalKey::Code(KeyCode::KeyR) | PhysicalKey::Code(KeyCode::Space) => {
                             self.world.reset();
                         }
+                        PhysicalKey::Code(KeyCode::KeyC) => self.world.toggle_spring(),
                         PhysicalKey::Code(KeyCode::KeyG) => self.world.toggle_gravity(),
                         PhysicalKey::Code(KeyCode::KeyN) => self.world.nudge(2800.0),
                         _ => {}
@@ -279,4 +285,44 @@ pub fn run() -> Result<()> {
     let mut app = App::new(settings);
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
+    let anchor = world.spring.anchor;
+    let ball = world.ball.pos;
+    let delta = ball - anchor;
+    let len = delta.length();
+    if len <= 1.0 {
+        return;
+    }
+
+    let dir = delta / len;
+    let normal = Vec2::new(-dir.y, dir.x);
+    let coils = (len / 34.0).round().clamp(6.0, 22.0);
+    let segments = (coils as usize * 8).max(2);
+    let outer = world.config.color_outer;
+    let inner = world.config.color_inner;
+
+    instances.push(Instance {
+        center: anchor.to_array(),
+        half: [8.0, 8.0],
+        color: [inner.x, inner.y, inner.z, 0.85],
+        softness: 0.75,
+        _pad: [0.0; 3],
+    });
+
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        let base = anchor + delta * t;
+        let end_fade = (t * (1.0 - t) * 4.0).clamp(0.0, 1.0);
+        let wave = (t * coils * std::f32::consts::TAU).sin() * 12.0 * end_fade;
+        let pos = base + normal * wave;
+        instances.push(Instance {
+            center: pos.to_array(),
+            half: [4.5, 4.5],
+            color: [outer.x, outer.y, outer.z, 0.62],
+            softness: 0.7,
+            _pad: [0.0; 3],
+        });
+    }
 }
