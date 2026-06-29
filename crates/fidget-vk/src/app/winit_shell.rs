@@ -1,6 +1,7 @@
 //! Current winit-based overlay shell used by Linux and preview builds.
 
 use anyhow::Result;
+use fidget_sim::{BottomEdge, Bounds};
 use glam::Vec2;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
@@ -23,12 +24,14 @@ pub(super) struct WinitApp {
     renderer: Option<Renderer>,
     window: Option<Window>,
     egui_state: Option<egui_winit::State>,
+    bottom_edges: Vec<BottomEdge>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct OverlayGeometry {
     position: PhysicalPosition<i32>,
     size: PhysicalSize<u32>,
+    bottom_edges: Vec<BottomEdge>,
 }
 
 impl WinitApp {
@@ -38,6 +41,7 @@ impl WinitApp {
             renderer: None,
             window: None,
             egui_state: None,
+            bottom_edges: Vec::new(),
         }
     }
 
@@ -85,7 +89,7 @@ impl WinitApp {
                         pixels_per_point: *pixels_per_point,
                     },
                 );
-        match renderer.render(self.core.instances(), egui_draw) {
+        match renderer.render(self.core.instances(), self.core.rubber_band(), egui_draw) {
             Ok(true) => {}
             Ok(false) => {
                 // Swapchain out of date: recreate at the current window size.
@@ -96,6 +100,8 @@ impl WinitApp {
                         event_loop.exit();
                     }
                     self.core.resize(size.width, size.height);
+                    self.core
+                        .set_bottom_edges(self.bottom_edges.iter().copied());
                 }
             }
             Err(e) => {
@@ -133,6 +139,7 @@ impl ApplicationHandler for WinitApp {
         };
         window.set_outer_position(overlay.position);
         let _ = window.request_inner_size(overlay.size);
+        self.bottom_edges = overlay.bottom_edges.clone();
 
         let size = window.inner_size();
         let display = window.display_handle().unwrap().as_raw();
@@ -149,6 +156,8 @@ impl ApplicationHandler for WinitApp {
         match Renderer::new(display, win, (size.width, size.height)) {
             Ok(renderer) => {
                 self.core.resize(size.width, size.height);
+                self.core
+                    .set_bottom_edges(self.bottom_edges.iter().copied());
                 self.renderer = Some(renderer);
                 self.window = Some(window);
                 self.egui_state = Some(egui_state);
@@ -197,6 +206,8 @@ impl ApplicationHandler for WinitApp {
                     let _ = renderer.resize((size.width, size.height));
                 }
                 self.core.resize(size.width, size.height);
+                self.core
+                    .set_bottom_edges(self.bottom_edges.iter().copied());
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if egui_consumed {
@@ -245,6 +256,12 @@ impl ApplicationHandler for WinitApp {
                         PhysicalKey::Code(KeyCode::KeyN) => {
                             self.core.apply_action(AppAction::Nudge);
                         }
+                        PhysicalKey::Code(KeyCode::KeyV) => {
+                            self.core.apply_action(AppAction::ToggleSpringVisual);
+                        }
+                        PhysicalKey::Code(KeyCode::KeyB) => {
+                            self.core.apply_action(AppAction::ToggleBottomBounce);
+                        }
                         _ => {}
                     }
                 }
@@ -280,11 +297,13 @@ fn overlay_geometry(event_loop: &ActiveEventLoop) -> OverlayGeometry {
         return OverlayGeometry {
             position: PhysicalPosition::new(0, 0),
             size: PhysicalSize::new(1280, 720),
+            bottom_edges: vec![BottomEdge::new(0.0, 1280.0, 720.0)],
         };
     };
 
     let pos = first.position();
     let size = first.size();
+    let mut monitor_rects = vec![(pos.x, pos.y, size.width, size.height)];
     let mut left = pos.x;
     let mut top = pos.y;
     let mut right = pos.x + size.width as i32;
@@ -293,14 +312,35 @@ fn overlay_geometry(event_loop: &ActiveEventLoop) -> OverlayGeometry {
     for monitor in monitors {
         let pos = monitor.position();
         let size = monitor.size();
+        monitor_rects.push((pos.x, pos.y, size.width, size.height));
         left = left.min(pos.x);
         top = top.min(pos.y);
         right = right.max(pos.x + size.width as i32);
         bottom = bottom.max(pos.y + size.height as i32);
     }
 
+    let monitor_bounds: Vec<_> = monitor_rects
+        .iter()
+        .map(|&(x, y, width, height)| {
+            Bounds::new(
+                (x - left) as f32,
+                (y - top) as f32,
+                (x - left + width as i32) as f32,
+                (y - top + height as i32) as f32,
+            )
+        })
+        .collect();
+    let overlay_bounds = Bounds::new(
+        0.0,
+        0.0,
+        (right - left).max(1) as f32,
+        (bottom - top).max(1) as f32,
+    );
+    let bottom_edges = BottomEdge::exposed_from_bounds(&monitor_bounds, overlay_bounds);
+
     OverlayGeometry {
         position: PhysicalPosition::new(left, top),
         size: PhysicalSize::new((right - left).max(1) as u32, (bottom - top).max(1) as u32),
+        bottom_edges,
     }
 }

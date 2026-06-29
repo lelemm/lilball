@@ -1,13 +1,13 @@
 use glam::{Vec2, Vec4};
 
+use crate::FIXED_DT;
 use crate::ball::Ball;
-use crate::bounds::Bounds;
+use crate::bounds::{BottomEdge, Bounds};
 use crate::collisions;
 use crate::interaction::InteractionState;
 use crate::particles::ParticleSystem;
 use crate::spring::SpringState;
 use crate::trail::Trail;
-use crate::FIXED_DT;
 
 /// Tunable simulation parameters. The renderer reads colours from here too so
 /// the "material" of the ball is data-driven.
@@ -23,6 +23,9 @@ pub struct WorldConfig {
     pub max_particles: usize,
     pub trail_enabled: bool,
     pub particles_enabled: bool,
+    /// If true, detached balls bounce from the bottom edge instead of falling
+    /// through the pit below the virtual desktop.
+    pub bounce_bottom_edge: bool,
     /// Inner (core) colour of the ball.
     pub color_inner: Vec4,
     /// Outer (rim/glow) colour of the ball.
@@ -57,6 +60,7 @@ impl Default for WorldConfig {
             max_particles: 2000,
             trail_enabled: true,
             particles_enabled: true,
+            bounce_bottom_edge: false,
             color_inner: Vec4::new(0.65, 0.85, 1.0, 1.0),
             color_outer: Vec4::new(0.1, 0.45, 1.0, 1.0),
             sleep_speed: 5.0,
@@ -78,6 +82,7 @@ impl Default for WorldConfig {
 pub struct World {
     pub config: WorldConfig,
     pub bounds: Bounds,
+    pub bottom_edges: Vec<BottomEdge>,
     pub ball: Ball,
     pub trail: Trail,
     pub particles: ParticleSystem,
@@ -105,6 +110,7 @@ impl World {
             cursor_time: None,
             config,
             bounds,
+            bottom_edges: vec![BottomEdge::from_bounds(bounds)],
             ball,
             trail,
             particles,
@@ -132,7 +138,22 @@ impl World {
 
     pub fn set_bounds(&mut self, bounds: Bounds) {
         self.bounds = bounds;
+        self.bottom_edges = vec![BottomEdge::from_bounds(bounds)];
         self.spring.set_bounds(bounds);
+    }
+
+    pub fn set_bottom_edges<I>(&mut self, edges: I)
+    where
+        I: IntoIterator<Item = BottomEdge>,
+    {
+        self.bottom_edges = edges
+            .into_iter()
+            .filter(|edge| edge.width() > 0.0)
+            .collect();
+        if self.bottom_edges.is_empty() {
+            self.bottom_edges.push(BottomEdge::from_bounds(self.bounds));
+        }
+        self.ball.wake();
     }
 
     /// Reset the ball onto the intact spring, at rest.
@@ -190,6 +211,15 @@ impl World {
 
     pub fn set_gravity_strength(&mut self, gravity: f32) {
         self.config.gravity = Vec2::new(0.0, gravity.clamp(0.0, 2400.0));
+        self.ball.wake();
+    }
+
+    pub fn bottom_bounce_enabled(&self) -> bool {
+        self.config.bounce_bottom_edge
+    }
+
+    pub fn set_bottom_bounce_enabled(&mut self, enabled: bool) {
+        self.config.bounce_bottom_edge = enabled;
         self.ball.wake();
     }
 
@@ -488,11 +518,19 @@ impl World {
         self.ball.squash_impulse *= (-dt * 14.0).exp();
 
         // Resolve walls and emit impact sparks.
-        let impacts = collisions::resolve_walls_with_bottom(
-            &mut self.ball,
-            &self.bounds,
-            self.spring.attached,
-        );
+        let impacts = if self.config.bounce_bottom_edge {
+            collisions::resolve_walls_with_bottom_edges(
+                &mut self.ball,
+                &self.bounds,
+                &self.bottom_edges,
+            )
+        } else {
+            collisions::resolve_walls_with_bottom(
+                &mut self.ball,
+                &self.bounds,
+                self.spring.attached,
+            )
+        };
         if self.config.particles_enabled {
             for im in &impacts {
                 if im.speed > 60.0 {

@@ -9,6 +9,32 @@ use serde::{Deserialize, Serialize};
 use fidget_sim::WorldConfig;
 use glam::{Vec2, Vec4};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpringVisual {
+    Spring,
+    RubberBand,
+}
+
+impl Default for SpringVisual {
+    fn default() -> Self {
+        Self::Spring
+    }
+}
+
+impl SpringVisual {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Spring => Self::RubberBand,
+            Self::RubberBand => Self::Spring,
+        }
+    }
+
+    pub fn is_rubber_band(self) -> bool {
+        matches!(self, Self::RubberBand)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BallSettings {
@@ -39,6 +65,7 @@ pub struct VisualSettings {
     pub particles: bool,
     pub trail: bool,
     pub max_particles: usize,
+    pub spring_visual: SpringVisual,
 }
 
 impl Default for VisualSettings {
@@ -47,6 +74,7 @@ impl Default for VisualSettings {
             particles: true,
             trail: true,
             max_particles: 2000,
+            spring_visual: SpringVisual::Spring,
         }
     }
 }
@@ -59,6 +87,7 @@ pub struct SimSettings {
     pub max_speed: f32,
     /// Cursor speed in px/s required to cut the spring by sweeping across it.
     pub cut_spring_cursor_speed: f32,
+    pub bounce_bottom_edge: bool,
 }
 
 impl Default for SimSettings {
@@ -67,6 +96,7 @@ impl Default for SimSettings {
             gravity: 600.0,
             max_speed: 4500.0,
             cut_spring_cursor_speed: 3600.0,
+            bounce_bottom_edge: false,
         }
     }
 }
@@ -114,6 +144,7 @@ impl Settings {
             gravity: Vec2::new(0.0, self.sim.gravity),
             max_speed: self.sim.max_speed,
             cut_spring_cursor_speed: self.sim.cut_spring_cursor_speed,
+            bounce_bottom_edge: self.sim.bounce_bottom_edge,
             max_particles: self.visuals.max_particles,
             trail_enabled: self.visuals.trail,
             particles_enabled: self.visuals.particles,

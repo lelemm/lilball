@@ -1,6 +1,6 @@
 use approx::assert_relative_eq;
 use fidget_sim::{
-    Ball, Bounds, InteractionState, ParticleSystem, Trail, World, WorldConfig, FIXED_DT,
+    Ball, BottomEdge, Bounds, FIXED_DT, InteractionState, ParticleSystem, Trail, World, WorldConfig,
 };
 use glam::{Vec2, Vec4};
 
@@ -135,6 +135,155 @@ fn cut_spring_lets_ball_fall_through_bottom() {
         world.ball.pos.y + r > world.bounds.bottom,
         "cut spring should disable the bottom wall, pos={:?}",
         world.ball.pos
+    );
+}
+
+#[test]
+fn cut_spring_bounces_off_bottom_when_bottom_bounce_enabled() {
+    let cfg = WorldConfig {
+        bounce_bottom_edge: true,
+        ..WorldConfig::default()
+    };
+    let mut world = World::new(cfg, Bounds::new(0.0, 0.0, 1000.0, 600.0));
+    let r = world.ball.radius;
+    world.cut_spring();
+    world.ball.pos = Vec2::new(500.0, world.bounds.bottom - r - 1.0);
+    world.ball.vel = Vec2::new(0.0, 900.0);
+
+    for _ in 0..8 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(!world.spring_attached());
+    assert!(
+        world.ball.pos.y + r <= world.bounds.bottom + 0.6,
+        "bottom bounce should keep detached ball in bounds, pos={:?}",
+        world.ball.pos
+    );
+    assert!(
+        world.ball.vel.y <= 0.0,
+        "bottom bounce should reverse downward velocity, vel={:?}",
+        world.ball.vel
+    );
+}
+
+#[test]
+fn bottom_bounce_uses_monitor_edge_under_ball() {
+    let cfg = WorldConfig {
+        bounce_bottom_edge: true,
+        ..WorldConfig::default()
+    };
+    let mut world = World::new(cfg, Bounds::new(0.0, 0.0, 2000.0, 1200.0));
+    world.set_bottom_edges([
+        BottomEdge::new(0.0, 1000.0, 800.0),
+        BottomEdge::new(1000.0, 2000.0, 1200.0),
+    ]);
+    let r = world.ball.radius;
+    world.cut_spring();
+    world.ball.pos = Vec2::new(500.0, 800.0 - r - 1.0);
+    world.ball.vel = Vec2::new(0.0, 900.0);
+
+    for _ in 0..8 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        world.ball.pos.y + r <= 800.0 + 0.6,
+        "ball should bounce at the left monitor bottom edge, pos={:?}",
+        world.ball.pos
+    );
+    assert!(
+        world.ball.vel.y <= 0.0,
+        "monitor-edge bounce should reverse downward velocity, vel={:?}",
+        world.ball.vel
+    );
+}
+
+#[test]
+fn bottom_bounce_ignores_monitor_edges_outside_ball_span() {
+    let cfg = WorldConfig {
+        bounce_bottom_edge: true,
+        ..WorldConfig::default()
+    };
+    let mut world = World::new(cfg, Bounds::new(0.0, 0.0, 2000.0, 1200.0));
+    world.set_bottom_edges([
+        BottomEdge::new(0.0, 1000.0, 800.0),
+        BottomEdge::new(1000.0, 2000.0, 1200.0),
+    ]);
+    let r = world.ball.radius;
+    world.cut_spring();
+    world.ball.pos = Vec2::new(1500.0, 900.0);
+    world.ball.vel = Vec2::new(0.0, 500.0);
+
+    for _ in 0..8 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        world.ball.pos.y > 900.0,
+        "right-side ball should keep falling instead of snapping to the left monitor edge, pos={:?}",
+        world.ball.pos
+    );
+    assert!(
+        world.ball.pos.y + r > 800.0 + 20.0,
+        "left monitor edge should not affect the right monitor span, pos={:?}",
+        world.ball.pos
+    );
+}
+
+#[test]
+fn bottom_bounce_passes_through_stacked_monitor_seam() {
+    let cfg = WorldConfig {
+        bounce_bottom_edge: true,
+        ..WorldConfig::default()
+    };
+    let bounds = Bounds::new(0.0, 0.0, 1000.0, 1200.0);
+    let monitors = [
+        Bounds::new(0.0, 0.0, 1000.0, 700.0),
+        Bounds::new(0.0, 700.0, 1000.0, 1200.0),
+    ];
+    let edges = BottomEdge::exposed_from_bounds(&monitors, bounds);
+    assert_eq!(edges, vec![BottomEdge::new(0.0, 1000.0, 1200.0)]);
+
+    let mut world = World::new(cfg, bounds);
+    world.set_bottom_edges(edges);
+    let r = world.ball.radius;
+    world.cut_spring();
+    world.ball.pos = Vec2::new(500.0, 700.0 - r - 1.0);
+    world.ball.vel = Vec2::new(0.0, 900.0);
+
+    for _ in 0..8 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        world.ball.pos.y + r > 700.0 + 8.0,
+        "ball should pass through the seam into the lower monitor, pos={:?}",
+        world.ball.pos
+    );
+    assert!(
+        world.ball.vel.y > 0.0,
+        "internal monitor seam should not reverse downward velocity, vel={:?}",
+        world.ball.vel
+    );
+}
+
+#[test]
+fn exposed_bottom_edges_keep_uncovered_parts_of_upper_monitor() {
+    let bounds = Bounds::new(0.0, 0.0, 1200.0, 1200.0);
+    let monitors = [
+        Bounds::new(0.0, 0.0, 1200.0, 700.0),
+        Bounds::new(300.0, 700.0, 900.0, 1200.0),
+    ];
+    let edges = BottomEdge::exposed_from_bounds(&monitors, bounds);
+
+    assert_eq!(
+        edges,
+        vec![
+            BottomEdge::new(0.0, 300.0, 700.0),
+            BottomEdge::new(900.0, 1200.0, 700.0),
+            BottomEdge::new(300.0, 900.0, 1200.0),
+        ]
     );
 }
 

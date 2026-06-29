@@ -1,7 +1,7 @@
 use glam::Vec2;
 
 use crate::ball::Ball;
-use crate::bounds::Bounds;
+use crate::bounds::{BottomEdge, Bounds};
 
 /// Description of a single wall hit produced during collision resolution, so
 /// the caller can spawn impact particles at the contact point.
@@ -26,6 +26,17 @@ pub fn resolve_walls_with_bottom(
     ball: &mut Ball,
     bounds: &Bounds,
     collide_bottom: bool,
+) -> Vec<Impact> {
+    let bottom = collide_bottom.then(|| BottomEdge::from_bounds(*bounds));
+    resolve_walls_with_bottom_edges(ball, bounds, bottom.as_slice())
+}
+
+/// Resolve side/top walls against `bounds` and bottom collisions against
+/// monitor-sized floor segments.
+pub fn resolve_walls_with_bottom_edges(
+    ball: &mut Ball,
+    bounds: &Bounds,
+    bottom_edges: &[BottomEdge],
 ) -> Vec<Impact> {
     let mut impacts = Vec::new();
     let r = ball.radius;
@@ -75,23 +86,33 @@ pub fn resolve_walls_with_bottom(
             speed,
         });
     }
-    // Bottom wall.
-    if collide_bottom && ball.pos.y + r > bounds.bottom {
+    if let Some(edge) = penetrated_bottom_edge(ball, bottom_edges) {
         let speed = ball.vel.y.max(0.0);
-        ball.pos.y = bounds.bottom - r;
+        ball.pos.y = edge.y - r;
         ball.vel.y = -ball.vel.y.abs() * ball.restitution;
         ball.vel.x *= 1.0 - ball.friction;
         ball.spin *= 1.0 - ball.friction;
         let n = Vec2::new(0.0, -1.0);
         ball.apply_impact(n, impulse_for(speed));
         impacts.push(Impact {
-            point: Vec2::new(ball.pos.x, bounds.bottom),
+            point: Vec2::new(ball.pos.x.clamp(edge.left, edge.right), edge.y),
             normal: n,
             speed,
         });
     }
 
     impacts
+}
+
+fn penetrated_bottom_edge(ball: &Ball, edges: &[BottomEdge]) -> Option<BottomEdge> {
+    let r = ball.radius;
+    edges
+        .iter()
+        .copied()
+        .filter(|edge| edge.width() > 0.0)
+        .filter(|edge| ball.pos.x >= edge.left && ball.pos.x <= edge.right)
+        .filter(|edge| ball.pos.y + r > edge.y)
+        .min_by(|a, b| a.y.total_cmp(&b.y))
 }
 
 fn impulse_for(speed: f32) -> f32 {

@@ -3,40 +3,46 @@
 use std::mem::size_of;
 use std::num::NonZeroIsize;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use egui::{Event, Modifiers, PointerButton, RawInput};
+use fidget_sim::{BottomEdge, Bounds};
 use glam::Vec2;
+use image::imageops::FilterType;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
 };
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
+    DeleteObject, EnumDisplayMonitors, GetMonitorInfoW, HDC, HGDIOBJ, HMONITOR, MONITORINFO,
+    ScreenToClient,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetKeyState, RegisterHotKey, ReleaseCapture, SetCapture, UnregisterHotKey,
-    MOD_ALT, MOD_CONTROL, VK_MENU, VK_RBUTTON, VK_SHIFT,
+    GetAsyncKeyState, GetKeyState, MOD_ALT, MOD_CONTROL, RegisterHotKey, ReleaseCapture,
+    SetCapture, UnregisterHotKey, VK_MENU, VK_RBUTTON, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION,
-    NOTIFYICONDATAW, NOTIFYICON_VERSION,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NOTIFYICON_VERSION,
+    NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
-    LoadCursorW, LoadIconW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
+    AppendMenuW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyMenu, DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetCursorPos,
+    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HCURSOR, HICON, HMENU, HTCLIENT,
+    HTTRANSPARENT, HWND_TOPMOST, ICONINFO, IDC_ARROW, IDI_APPLICATION, KillTimer, LWA_ALPHA,
+    LoadCursorW, LoadIconW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
+    PostQuitMessage, RegisterClassW, SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYSMICON,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, HCURSOR, HICON, HMENU,
-    HTCLIENT, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, LWA_ALPHA, MF_CHECKED,
-    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-    TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU,
-    WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_TIMER,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_POPUP,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS, TranslateMessage,
+    WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+    WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
+use windows::core::{BOOL, PCWSTR};
 
 use crate::app::core::{AppAction, Core};
 use crate::config::Settings;
@@ -69,6 +75,9 @@ const MENU_TOGGLE_SPRING: usize = 203;
 const MENU_TOGGLE_GRAVITY: usize = 204;
 const MENU_NUDGE: usize = 205;
 const MENU_QUIT: usize = 206;
+const MENU_TOGGLE_RUBBER_BAND: usize = 207;
+const MENU_TOGGLE_BOTTOM_BOUNCE: usize = 208;
+const SOCCER_ICON_PNG: &[u8] = include_bytes!("../../../../assets/soccer_ball_material.png");
 
 pub(super) fn run() -> Result<()> {
     let instance = module_instance()?;
@@ -95,7 +104,7 @@ pub(super) fn run() -> Result<()> {
         .context("failed to create Win32 overlay window")?
     };
 
-    let mut shell = Box::new(Win32App::new(hwnd, instance, geometry));
+    let mut shell = Box::new(Win32App::new(hwnd, instance, geometry.clone()));
     unsafe {
         SetWindowLongPtrW(
             hwnd,
@@ -194,6 +203,8 @@ impl Win32App {
     fn init_renderer(&mut self) -> Result<()> {
         self.core
             .resize(self.geometry.width as u32, self.geometry.height as u32);
+        self.core
+            .set_bottom_edges(self.geometry.bottom_edges.iter().copied());
         let display = RawDisplayHandle::Windows(WindowsDisplayHandle::new());
         let hwnd = NonZeroIsize::new(self.hwnd.0 as isize).ok_or_else(|| anyhow!("null HWND"))?;
         let hinstance = NonZeroIsize::new(self.instance.0 as isize);
@@ -243,7 +254,11 @@ impl Win32App {
             clipped_primitives: &clipped_primitives,
             pixels_per_point,
         };
-        match renderer.render(self.core.instances(), Some(egui_draw)) {
+        match renderer.render(
+            self.core.instances(),
+            self.core.rubber_band(),
+            Some(egui_draw),
+        ) {
             Ok(true) => {}
             Ok(false) => {
                 if let Err(e) =
@@ -265,6 +280,8 @@ impl Win32App {
         self.geometry.height = height.max(1);
         self.core
             .resize(self.geometry.width as u32, self.geometry.height as u32);
+        self.core
+            .set_bottom_edges(self.geometry.bottom_edges.iter().copied());
         self.update_egui_screen_rect();
         if let Some(renderer) = self.renderer.as_mut() {
             if let Err(e) =
@@ -556,9 +573,21 @@ impl Win32App {
             );
             append_checked_menu(
                 menu,
+                MENU_TOGGLE_RUBBER_BAND,
+                "Rubber band visual",
+                self.core.rubber_band_visual_enabled(),
+            );
+            append_checked_menu(
+                menu,
                 MENU_TOGGLE_GRAVITY,
                 "Gravity enabled",
                 self.core.gravity_enabled(),
+            );
+            append_checked_menu(
+                menu,
+                MENU_TOGGLE_BOTTOM_BOUNCE,
+                "Bounce bottom edge",
+                self.core.bottom_bounce_enabled(),
             );
             append_menu(menu, MENU_NUDGE, "Fling ball");
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -582,7 +611,9 @@ impl Win32App {
             MENU_TOGGLE_HUD => self.core.apply_action(AppAction::ToggleHud),
             MENU_RESET => self.core.apply_action(AppAction::Reset),
             MENU_TOGGLE_SPRING => self.core.apply_action(AppAction::ToggleSpring),
+            MENU_TOGGLE_RUBBER_BAND => self.core.apply_action(AppAction::ToggleSpringVisual),
             MENU_TOGGLE_GRAVITY => self.core.apply_action(AppAction::ToggleGravity),
+            MENU_TOGGLE_BOTTOM_BOUNCE => self.core.apply_action(AppAction::ToggleBottomBounce),
             MENU_NUDGE => self.core.apply_action(AppAction::Nudge),
             MENU_QUIT => self.quit(),
             _ => {}
@@ -651,12 +682,13 @@ impl Win32App {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct OverlayGeometry {
     x: i32,
     y: i32,
     width: i32,
     height: i32,
+    bottom_edges: Vec<BottomEdge>,
 }
 
 impl OverlayGeometry {
@@ -666,14 +698,72 @@ impl OverlayGeometry {
             let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
             let width = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1);
             let height = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
+            let monitor_bounds = monitor_bounds(x, y);
+            let fallback = Bounds::new(0.0, 0.0, width as f32, height as f32);
+            let bottom_edges = BottomEdge::exposed_from_bounds(&monitor_bounds, fallback);
             Self {
                 x,
                 y,
                 width,
                 height,
+                bottom_edges,
             }
         }
     }
+}
+
+struct MonitorEdgeCollector {
+    origin_x: i32,
+    origin_y: i32,
+    bounds: Vec<Bounds>,
+}
+
+fn monitor_bounds(origin_x: i32, origin_y: i32) -> Vec<Bounds> {
+    let mut collector = MonitorEdgeCollector {
+        origin_x,
+        origin_y,
+        bounds: Vec::new(),
+    };
+    let ok = unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(collect_monitor_edge),
+            LPARAM(&mut collector as *mut MonitorEdgeCollector as isize),
+        )
+    };
+    if !ok.as_bool() {
+        log::warn!("failed to enumerate display monitors for bottom bounce edges");
+    }
+    collector.bounds
+}
+
+unsafe extern "system" fn collect_monitor_edge(
+    monitor: HMONITOR,
+    _hdc: HDC,
+    rect: *mut RECT,
+    data: LPARAM,
+) -> BOOL {
+    let collector = unsafe { &mut *(data.0 as *mut MonitorEdgeCollector) };
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let monitor_rect = if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        info.rcMonitor
+    } else if !rect.is_null() {
+        unsafe { *rect }
+    } else {
+        return BOOL(1);
+    };
+
+    collector.bounds.push(Bounds::new(
+        (monitor_rect.left - collector.origin_x) as f32,
+        (monitor_rect.top - collector.origin_y) as f32,
+        (monitor_rect.right - collector.origin_x) as f32,
+        (monitor_rect.bottom - collector.origin_y) as f32,
+    ));
+    BOOL(1)
 }
 
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -787,7 +877,99 @@ fn module_instance() -> Result<HINSTANCE> {
 }
 
 fn app_icon() -> HICON {
-    unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or(HICON::default()) }
+    match soccer_ball_icon() {
+        Ok(icon) => icon,
+        Err(e) => {
+            log::warn!("failed to create soccer ball tray icon: {e}");
+            unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or(HICON::default()) }
+        }
+    }
+}
+
+fn soccer_ball_icon() -> Result<HICON> {
+    let width = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+    let height = unsafe { GetSystemMetrics(SM_CYSMICON) }.max(16);
+    let size = width.min(height).clamp(16, 64) as u32;
+    let image = image::load_from_memory(SOCCER_ICON_PNG)
+        .context("failed to decode embedded soccer ball texture")?
+        .resize_to_fill(size, size, FilterType::Lanczos3)
+        .to_rgba8();
+    let size_i32 = size as i32;
+
+    let bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: size_i32,
+            biHeight: -size_i32,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut bits = std::ptr::null_mut();
+    let color = unsafe {
+        CreateDIBSection(None, &bitmap_info, DIB_RGB_COLORS, &mut bits, None, 0)
+            .context("failed to create icon color bitmap")?
+    };
+
+    let result = (|| {
+        let pixels =
+            unsafe { std::slice::from_raw_parts_mut(bits as *mut u8, (size * size * 4) as usize) };
+        for y in 0..size {
+            for x in 0..size {
+                let i = ((y * size + x) * 4) as usize;
+                let px = image.get_pixel(x, y);
+                let nx = (x as f32 + 0.5) / size as f32 * 2.0 - 1.0;
+                let ny = (y as f32 + 0.5) / size as f32 * 2.0 - 1.0;
+                let r2 = nx * nx + ny * ny;
+                let edge = (1.0 - ((r2.sqrt() - 0.88) / 0.12).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                let z = (1.0 - r2).max(0.0).sqrt();
+                let shade = (0.66 + z * 0.34).clamp(0.0, 1.0);
+                pixels[i] = (px[2] as f32 * shade) as u8;
+                pixels[i + 1] = (px[1] as f32 * shade) as u8;
+                pixels[i + 2] = (px[0] as f32 * shade) as u8;
+                pixels[i + 3] = (px[3] as f32 * edge) as u8;
+            }
+        }
+
+        let mask_stride = size.div_ceil(32) * 4;
+        let mask_bits = vec![0_u8; (mask_stride * size) as usize];
+        let mask = unsafe {
+            CreateBitmap(
+                size_i32,
+                size_i32,
+                1,
+                1,
+                Some(mask_bits.as_ptr() as *const std::ffi::c_void),
+            )
+        };
+        if mask.is_invalid() {
+            return Err(anyhow!("failed to create icon mask bitmap"));
+        }
+
+        let icon_info = ICONINFO {
+            fIcon: BOOL(1),
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask,
+            hbmColor: color,
+        };
+        let icon_result =
+            unsafe { windows::Win32::UI::WindowsAndMessaging::CreateIconIndirect(&icon_info) }
+                .context("failed to create soccer ball icon");
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ::from(mask));
+        }
+        icon_result
+    })();
+
+    unsafe {
+        let _ = DeleteObject(HGDIOBJ::from(color));
+    }
+    result
 }
 
 unsafe fn append_menu(menu: HMENU, id: usize, text: &str) {

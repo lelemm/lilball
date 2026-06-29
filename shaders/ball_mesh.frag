@@ -2,6 +2,7 @@
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec3 v_normal;
+layout(location = 2) in float v_alpha;
 
 layout(set = 0, binding = 0) uniform sampler2D u_ball_texture;
 
@@ -19,5 +20,6 @@ void main() {
     float rim = mix(0.76, 1.0, smoothstep(0.0, 0.35, v_normal.z));
     vec3 color = tex * matte * rim;
 
-    frag = vec4(color, 1.0);
+    float alpha = clamp(v_alpha, 0.0, 1.0);
+    frag = vec4(color * alpha, alpha);
 }

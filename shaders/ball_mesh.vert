@@ -12,6 +12,7 @@ layout(push_constant) uniform Push {
 
 layout(location = 0) out vec2 v_uv;
 layout(location = 1) out vec3 v_normal;
+layout(location = 2) out float v_alpha;
 
 void main() {
     vec2 axis = pc.shape.zw;
@@ -43,4 +44,5 @@ void main() {
     gl_Position = vec4(ndc, 0.0, 1.0);
     v_uv = a_uv;
     v_normal = normalize(vec3(normal_x, n.y, normal_z));
+    v_alpha = pc.roll.y;
 }

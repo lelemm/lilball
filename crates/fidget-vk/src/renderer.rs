@@ -8,10 +8,11 @@
 
 use std::ffi::CStr;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ash::vk;
 use egui::{ClippedPrimitive, TextureId, TexturesDelta};
 use egui_ash_renderer::{Options as EguiRendererOptions, Renderer as EguiRenderer};
+use glam::{Vec2, Vec3, Vec4};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 /// Per-instance vertex data. Layout must match `shaders/blob.vert`.
@@ -34,13 +35,18 @@ pub struct EguiDrawData<'a> {
 }
 
 const MAX_INSTANCES: usize = 8192;
+const MAX_RUBBER_VERTICES: usize = 16_384;
+const MAX_RUBBER_INDICES: usize = 65_536;
 const FRAMES_IN_FLIGHT: usize = 2;
+const RUBBER_RING_SEGMENTS: usize = 14;
 
 // Embedded compiled shaders (produced by build.rs).
 const VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blob.vert.spv"));
 const FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blob.frag.spv"));
 const MESH_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ball_mesh.vert.spv"));
 const MESH_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ball_mesh.frag.spv"));
+const RUBBER_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rubber_mesh.vert.spv"));
+const RUBBER_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rubber_mesh.frag.spv"));
 const SOCCER_TEXTURE_PNG: &[u8] = include_bytes!("../../../assets/soccer_ball_material.png");
 const SOCCER_GLB: &[u8] =
     include_bytes!("../../../assets/Meshy_AI_Soccer_ball_0628153454_texture.glb");
@@ -65,6 +71,66 @@ struct MeshVertex {
     pos: [f32; 3],
     normal: [f32; 3],
     uv: [f32; 2],
+}
+
+/// Dynamic 3D tube vertex for the rubber band. Layout must match
+/// `shaders/rubber_mesh.vert`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RubberVertex {
+    pub pos: [f32; 3],
+    pub normal: [f32; 3],
+    pub color: [f32; 4],
+    /// x = normalized path length, y = joint strength, z = local tube radius.
+    pub rubber: [f32; 4],
+}
+
+#[derive(Default)]
+pub struct RubberBandMesh {
+    pub vertices: Vec<RubberVertex>,
+    pub indices: Vec<u32>,
+}
+
+impl RubberBandMesh {
+    pub fn with_capacity(vertices: usize, indices: usize) -> Self {
+        Self {
+            vertices: Vec::with_capacity(vertices),
+            indices: Vec::with_capacity(indices),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.vertices.clear();
+        self.indices.clear();
+    }
+
+    pub fn rebuild(
+        &mut self,
+        path: &[Vec2],
+        joints: &[Vec2],
+        primary: Vec4,
+        accent: Vec4,
+        radius: f32,
+    ) {
+        self.clear();
+        if path.len() < 2 {
+            return;
+        }
+
+        let samples = sample_rubber_path(path);
+        if samples.len() < 2 {
+            return;
+        }
+
+        append_tube(self, &samples, joints, primary, accent, radius);
+        for &joint in joints {
+            append_joint_bulb(self, joint, radius * 1.55, primary, accent);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
 }
 
 struct BallMesh {
@@ -101,12 +167,16 @@ pub struct Renderer {
     pipeline: vk::Pipeline,
     mesh_pipeline_layout: vk::PipelineLayout,
     mesh_pipeline: vk::Pipeline,
+    rubber_pipeline_layout: vk::PipelineLayout,
+    rubber_pipeline: vk::Pipeline,
     egui_renderer: Option<EguiRenderer>,
 
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
     quad_buffer: Buffer,
     instance_buffers: Vec<Buffer>,
+    rubber_vertex_buffers: Vec<Buffer>,
+    rubber_index_buffers: Vec<Buffer>,
     ball_mesh: BallMesh,
 
     image_available: Vec<vk::Semaphore>,
@@ -196,6 +266,8 @@ impl Renderer {
             create_pipeline(&device, render_pass, descriptor_set_layout)?;
         let (mesh_pipeline_layout, mesh_pipeline) =
             create_mesh_pipeline(&device, render_pass, descriptor_set_layout)?;
+        let (rubber_pipeline_layout, rubber_pipeline) =
+            create_rubber_pipeline(&device, render_pass)?;
         let egui_renderer = EguiRenderer::with_default_allocator(
             &instance,
             physical_device,
@@ -260,6 +332,22 @@ impl Renderer {
                 vk::BufferUsageFlags::VERTEX_BUFFER,
             )?);
         }
+        let mut rubber_vertex_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut rubber_index_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        for _ in 0..FRAMES_IN_FLIGHT {
+            rubber_vertex_buffers.push(create_host_buffer(
+                &device,
+                &mem_props,
+                (MAX_RUBBER_VERTICES * std::mem::size_of::<RubberVertex>()) as vk::DeviceSize,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+            )?);
+            rubber_index_buffers.push(create_host_buffer(
+                &device,
+                &mem_props,
+                (MAX_RUBBER_INDICES * std::mem::size_of::<u32>()) as vk::DeviceSize,
+                vk::BufferUsageFlags::INDEX_BUFFER,
+            )?);
+        }
 
         let ball_mesh = create_ball_mesh(&device, &mem_props, command_pool, queue, SOCCER_GLB)
             .context("failed to load GLB soccer ball mesh")?;
@@ -303,11 +391,15 @@ impl Renderer {
             pipeline,
             mesh_pipeline_layout,
             mesh_pipeline,
+            rubber_pipeline_layout,
+            rubber_pipeline,
             egui_renderer: Some(egui_renderer),
             command_pool,
             command_buffers,
             quad_buffer,
             instance_buffers,
+            rubber_vertex_buffers,
+            rubber_index_buffers,
             ball_mesh,
             image_available,
             render_finished,
@@ -354,6 +446,7 @@ impl Renderer {
     pub fn render(
         &mut self,
         instances: &[Instance],
+        rubber_band: &RubberBandMesh,
         egui: Option<EguiDrawData<'_>>,
     ) -> Result<bool> {
         let frame = self.current_frame;
@@ -394,15 +487,15 @@ impl Renderer {
                 .map_err(|e| anyhow!("failed to upload egui textures: {e}"))?;
         }
 
-        // Upload blob instances for this frame. The material=1 ball body
-        // instance becomes the transform for the GLB mesh draw instead.
+        // Upload blob instances for this frame. Material=1 instances become
+        // GLB ball mesh draws, including rubber-mode ghost trail balls.
         let mut count = 0usize;
-        let mut ball_instance = None;
+        let mut ball_instances = Vec::with_capacity(80);
         unsafe {
             let dst = self.instance_buffers[frame].mapped as *mut Instance;
             for instance in instances {
                 if instance.material > 0.5 {
-                    ball_instance = Some(*instance);
+                    ball_instances.push(*instance);
                 } else if count < MAX_INSTANCES {
                     dst.add(count).write(*instance);
                     count += 1;
@@ -410,11 +503,15 @@ impl Renderer {
             }
         }
 
+        let (_rubber_vertex_count, rubber_index_count) =
+            self.upload_rubber_band(frame, rubber_band);
+
         self.record_command_buffer(
             frame,
             image_index as usize,
             count as u32,
-            ball_instance,
+            rubber_index_count,
+            &ball_instances,
             egui.as_ref(),
         )?;
 
@@ -449,12 +546,40 @@ impl Renderer {
         }
     }
 
+    fn upload_rubber_band(&mut self, frame: usize, rubber_band: &RubberBandMesh) -> (u32, u32) {
+        if rubber_band.is_empty()
+            || rubber_band.vertices.len() > MAX_RUBBER_VERTICES
+            || rubber_band.indices.len() > MAX_RUBBER_INDICES
+        {
+            return (0, 0);
+        }
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                rubber_band.vertices.as_ptr() as *const u8,
+                self.rubber_vertex_buffers[frame].mapped,
+                std::mem::size_of_val(rubber_band.vertices.as_slice()),
+            );
+            std::ptr::copy_nonoverlapping(
+                rubber_band.indices.as_ptr() as *const u8,
+                self.rubber_index_buffers[frame].mapped,
+                std::mem::size_of_val(rubber_band.indices.as_slice()),
+            );
+        }
+
+        (
+            rubber_band.vertices.len() as u32,
+            rubber_band.indices.len() as u32,
+        )
+    }
+
     fn record_command_buffer(
         &mut self,
         frame: usize,
         image_index: usize,
         count: u32,
-        ball_instance: Option<Instance>,
+        rubber_index_count: u32,
+        ball_instances: &[Instance],
         egui: Option<&EguiDrawData<'_>>,
     ) -> Result<()> {
         let cmd = self.command_buffers[frame];
@@ -532,17 +657,42 @@ impl Renderer {
                 self.device.cmd_draw(cmd, 6, count, 0, 0);
             }
 
-            if let Some(ball) = ball_instance {
-                let mesh_push = [
-                    [
-                        self.swap.extent.width as f32,
-                        self.swap.extent.height as f32,
-                        ball.center[0],
-                        ball.center[1],
-                    ],
-                    [ball.half[0], ball.half[1], ball.roll[0], ball.roll[1]],
-                    [ball.roll[2], 0.0, 0.0, 0.0],
+            if rubber_index_count > 0 {
+                let rubber_push = [
+                    self.swap.extent.width as f32,
+                    self.swap.extent.height as f32,
+                    0.0,
+                    0.0,
                 ];
+                self.device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.rubber_pipeline,
+                );
+                self.device.cmd_push_constants(
+                    cmd,
+                    self.rubber_pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    bytemuck_bytes(&rubber_push),
+                );
+                self.device.cmd_bind_vertex_buffers(
+                    cmd,
+                    0,
+                    &[self.rubber_vertex_buffers[frame].buffer],
+                    &[0],
+                );
+                self.device.cmd_bind_index_buffer(
+                    cmd,
+                    self.rubber_index_buffers[frame].buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device
+                    .cmd_draw_indexed(cmd, rubber_index_count, 1, 0, 0, 0);
+            }
+
+            if !ball_instances.is_empty() {
                 self.device.cmd_bind_pipeline(
                     cmd,
                     vk::PipelineBindPoint::GRAPHICS,
@@ -556,13 +706,6 @@ impl Renderer {
                     &[self.descriptor_set],
                     &[],
                 );
-                self.device.cmd_push_constants(
-                    cmd,
-                    self.mesh_pipeline_layout,
-                    vk::ShaderStageFlags::VERTEX,
-                    0,
-                    bytemuck_bytes(&mesh_push),
-                );
                 self.device.cmd_bind_vertex_buffers(
                     cmd,
                     0,
@@ -575,8 +718,27 @@ impl Renderer {
                     0,
                     vk::IndexType::UINT32,
                 );
-                self.device
-                    .cmd_draw_indexed(cmd, self.ball_mesh.index_count, 1, 0, 0, 0);
+                for ball in ball_instances {
+                    let mesh_push = [
+                        [
+                            self.swap.extent.width as f32,
+                            self.swap.extent.height as f32,
+                            ball.center[0],
+                            ball.center[1],
+                        ],
+                        [ball.half[0], ball.half[1], ball.roll[0], ball.roll[1]],
+                        [ball.roll[2], ball.color[3], 0.0, 0.0],
+                    ];
+                    self.device.cmd_push_constants(
+                        cmd,
+                        self.mesh_pipeline_layout,
+                        vk::ShaderStageFlags::VERTEX,
+                        0,
+                        bytemuck_bytes(&mesh_push),
+                    );
+                    self.device
+                        .cmd_draw_indexed(cmd, self.ball_mesh.index_count, 1, 0, 0, 0);
+                }
             }
 
             if let Some(egui) = egui {
@@ -629,6 +791,12 @@ impl Drop for Renderer {
             for b in &self.instance_buffers {
                 destroy_buffer(&self.device, b);
             }
+            for b in &self.rubber_index_buffers {
+                destroy_buffer(&self.device, b);
+            }
+            for b in &self.rubber_vertex_buffers {
+                destroy_buffer(&self.device, b);
+            }
             destroy_buffer(&self.device, &self.ball_mesh.index_buffer);
             destroy_buffer(&self.device, &self.ball_mesh.vertex_buffer);
             destroy_texture(&self.device, &self.ball_mesh.texture);
@@ -638,6 +806,9 @@ impl Drop for Renderer {
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
             destroy_buffer(&self.device, &self.quad_buffer);
             self.device.destroy_command_pool(self.command_pool, None);
+            self.device.destroy_pipeline(self.rubber_pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.rubber_pipeline_layout, None);
             self.device.destroy_pipeline(self.mesh_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.mesh_pipeline_layout, None);
@@ -657,6 +828,199 @@ impl Drop for Renderer {
 
 fn bytemuck_bytes<T>(v: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v as *const T as *const u8, std::mem::size_of::<T>()) }
+}
+
+fn sample_rubber_path(path: &[Vec2]) -> Vec<Vec2> {
+    let mut samples = Vec::with_capacity(path.len() * 8);
+    for i in 0..path.len() - 1 {
+        let p1 = path[i];
+        let p2 = path[i + 1];
+        let len = p1.distance(p2);
+        if len <= 0.5 {
+            continue;
+        }
+
+        let density = bend_density_factor(path, i);
+        let steps = ((len / 14.0) * density).ceil().clamp(3.0, 44.0) as usize;
+        for step in 0..steps {
+            if i > 0 && step == 0 {
+                continue;
+            }
+
+            let t = step as f32 / steps as f32;
+            let point = if path.len() > 2 {
+                let p0 = if i == 0 { p1 } else { path[i - 1] };
+                let p3 = if i + 2 < path.len() { path[i + 2] } else { p2 };
+                catmull_rom(p0, p1, p2, p3, t)
+            } else {
+                p1.lerp(p2, t)
+            };
+            samples.push(point);
+        }
+    }
+
+    if let Some(&last) = path.last() {
+        samples.push(last);
+    }
+    samples
+}
+
+fn bend_density_factor(path: &[Vec2], segment: usize) -> f32 {
+    let incoming = if segment > 0 {
+        bend_angle(path[segment - 1], path[segment], path[segment + 1])
+    } else {
+        0.0
+    };
+    let outgoing = if segment + 2 < path.len() {
+        bend_angle(path[segment], path[segment + 1], path[segment + 2])
+    } else {
+        0.0
+    };
+    let bend = incoming.max(outgoing);
+    1.0 + (bend / std::f32::consts::PI).powf(0.75) * 3.5
+}
+
+fn bend_angle(prev: Vec2, pivot: Vec2, next: Vec2) -> f32 {
+    let a = (pivot - prev).normalize_or_zero();
+    let b = (next - pivot).normalize_or_zero();
+    if a.length_squared() == 0.0 || b.length_squared() == 0.0 {
+        0.0
+    } else {
+        a.angle_to(b).abs()
+    }
+}
+
+fn catmull_rom(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Vec2 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    ((p1 * 2.0)
+        + (p2 - p0) * t
+        + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2
+        + (-p0 + p1 * 3.0 - p2 * 3.0 + p3) * t3)
+        * 0.5
+}
+
+fn append_tube(
+    mesh: &mut RubberBandMesh,
+    samples: &[Vec2],
+    joints: &[Vec2],
+    primary: Vec4,
+    accent: Vec4,
+    radius: f32,
+) {
+    let mut lengths = Vec::with_capacity(samples.len());
+    lengths.push(0.0);
+    for i in 1..samples.len() {
+        let next = lengths[i - 1] + samples[i].distance(samples[i - 1]);
+        lengths.push(next);
+    }
+    let total = lengths.last().copied().unwrap_or(1.0).max(1.0);
+    let base = mesh.vertices.len() as u32;
+
+    for (i, &point) in samples.iter().enumerate() {
+        let tangent = tangent_at(samples, i);
+        let side = Vec2::new(-tangent.y, tangent.x);
+        let length_t = lengths[i] / total;
+        let joint = joint_strength(point, joints, radius);
+        let local_radius = radius * (1.0 + joint * 0.62);
+        let stripe = (length_t * std::f32::consts::TAU * 5.5).sin() * 0.5 + 0.5;
+        let color = primary.lerp(accent, (joint * 0.72 + stripe * 0.08).clamp(0.0, 1.0));
+
+        for segment in 0..RUBBER_RING_SEGMENTS {
+            let angle = segment as f32 / RUBBER_RING_SEGMENTS as f32 * std::f32::consts::TAU;
+            let (sin, cos) = angle.sin_cos();
+            let normal = Vec3::new(side.x * cos, side.y * cos, sin).normalize();
+            let offset = side * (cos * local_radius);
+            mesh.vertices.push(RubberVertex {
+                pos: [point.x + offset.x, point.y + offset.y, sin * local_radius],
+                normal: normal.to_array(),
+                color: [color.x, color.y, color.z, 0.92],
+                rubber: [length_t, joint, local_radius, 0.0],
+            });
+        }
+    }
+
+    for ring in 0..samples.len() - 1 {
+        for segment in 0..RUBBER_RING_SEGMENTS {
+            let next = (segment + 1) % RUBBER_RING_SEGMENTS;
+            let a = base + (ring * RUBBER_RING_SEGMENTS + segment) as u32;
+            let b = base + (ring * RUBBER_RING_SEGMENTS + next) as u32;
+            let c = base + ((ring + 1) * RUBBER_RING_SEGMENTS + segment) as u32;
+            let d = base + ((ring + 1) * RUBBER_RING_SEGMENTS + next) as u32;
+            mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+}
+
+fn tangent_at(samples: &[Vec2], i: usize) -> Vec2 {
+    let tangent = if i == 0 {
+        samples[1] - samples[0]
+    } else if i + 1 == samples.len() {
+        samples[i] - samples[i - 1]
+    } else {
+        samples[i + 1] - samples[i - 1]
+    };
+    let normalized = tangent.normalize_or_zero();
+    if normalized.length_squared() > 0.0 {
+        normalized
+    } else {
+        Vec2::Y
+    }
+}
+
+fn joint_strength(point: Vec2, joints: &[Vec2], radius: f32) -> f32 {
+    joints
+        .iter()
+        .map(|&joint| {
+            let proximity = 1.0 - (point.distance(joint) / (radius * 5.0)).clamp(0.0, 1.0);
+            proximity * proximity * (3.0 - 2.0 * proximity)
+        })
+        .fold(0.0_f32, f32::max)
+}
+
+fn append_joint_bulb(
+    mesh: &mut RubberBandMesh,
+    center: Vec2,
+    radius: f32,
+    primary: Vec4,
+    accent: Vec4,
+) {
+    const LAT_SEGMENTS: usize = 6;
+    const LON_SEGMENTS: usize = 16;
+
+    let base = mesh.vertices.len() as u32;
+    for lat in 0..=LAT_SEGMENTS {
+        let phi = lat as f32 / LAT_SEGMENTS as f32 * std::f32::consts::FRAC_PI_2;
+        let z = phi.cos();
+        let ring_radius = phi.sin();
+        for lon in 0..LON_SEGMENTS {
+            let theta = lon as f32 / LON_SEGMENTS as f32 * std::f32::consts::TAU;
+            let (sin, cos) = theta.sin_cos();
+            let normal = Vec3::new(cos * ring_radius, sin * ring_radius, z).normalize();
+            let color = primary.lerp(accent, 0.72 + 0.18 * z);
+            mesh.vertices.push(RubberVertex {
+                pos: [
+                    center.x + normal.x * radius,
+                    center.y + normal.y * radius,
+                    normal.z * radius,
+                ],
+                normal: normal.to_array(),
+                color: [color.x, color.y, color.z, 0.96],
+                rubber: [0.0, 1.0, radius, 1.0],
+            });
+        }
+    }
+
+    for lat in 0..LAT_SEGMENTS {
+        for lon in 0..LON_SEGMENTS {
+            let next = (lon + 1) % LON_SEGMENTS;
+            let a = base + (lat * LON_SEGMENTS + lon) as u32;
+            let b = base + (lat * LON_SEGMENTS + next) as u32;
+            let c = base + ((lat + 1) * LON_SEGMENTS + lon) as u32;
+            let d = base + ((lat + 1) * LON_SEGMENTS + next) as u32;
+            mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
 }
 
 fn pick_device(
@@ -1111,6 +1475,117 @@ fn create_mesh_pipeline(
     Ok((pipeline_layout, pipeline))
 }
 
+fn create_rubber_pipeline(
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+) -> Result<(vk::PipelineLayout, vk::Pipeline)> {
+    let vert = create_shader_module(device, RUBBER_VERT_SPV)?;
+    let frag = create_shader_module(device, RUBBER_FRAG_SPV)?;
+
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vert)
+            .name(c"main"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(frag)
+            .name(c"main"),
+    ];
+
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(std::mem::size_of::<RubberVertex>() as u32)
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let attributes = [
+        vk::VertexInputAttributeDescription::default()
+            .location(0)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(0),
+        vk::VertexInputAttributeDescription::default()
+            .location(1)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(12),
+        vk::VertexInputAttributeDescription::default()
+            .location(2)
+            .binding(0)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(24),
+        vk::VertexInputAttributeDescription::default()
+            .location(3)
+            .binding(0)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(40),
+    ];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&bindings)
+        .vertex_attribute_descriptions(&attributes);
+
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::ONE)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD)
+        .color_write_mask(vk::ColorComponentFlags::RGBA);
+    let blend_attachments = [blend_attachment];
+    let color_blend =
+        vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state =
+        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let push_range = vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+        .offset(0)
+        .size(std::mem::size_of::<[f32; 4]>() as u32);
+    let push_ranges = [push_range];
+    let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push_ranges);
+    let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
+
+    let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterizer)
+        .multisample_state(&multisample)
+        .color_blend_state(&color_blend)
+        .dynamic_state(&dynamic_state)
+        .layout(pipeline_layout)
+        .render_pass(render_pass)
+        .subpass(0);
+
+    let pipeline = unsafe {
+        device
+            .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+            .map_err(|(_, e)| anyhow!("failed to create rubber graphics pipeline: {e}"))?[0]
+    };
+
+    unsafe {
+        device.destroy_shader_module(vert, None);
+        device.destroy_shader_module(frag, None);
+    }
+
+    Ok((pipeline_layout, pipeline))
+}
+
 fn create_shader_module(device: &ash::Device, spv: &[u8]) -> Result<vk::ShaderModule> {
     let mut code = Vec::with_capacity(spv.len() / 4);
     for chunk in spv.chunks_exact(4) {
@@ -1323,7 +1798,7 @@ fn read_index_accessor(
         _ => {
             return Err(anyhow!(
                 "unsupported GLB index component type {component_type}"
-            ))
+            ));
         }
     };
     let view_index = value_usize(&accessor["bufferView"])?;
@@ -1730,5 +2205,49 @@ mod tests {
             mesh.base_color.starts_with(&[0xFF, 0xD8, 0xFF]),
             "base color should be the embedded JPEG texture"
         );
+    }
+
+    #[test]
+    fn builds_rubber_band_tube_with_joint_bulbs() {
+        let mut mesh = RubberBandMesh::default();
+        let path = [
+            Vec2::new(120.0, 40.0),
+            Vec2::new(160.0, 140.0),
+            Vec2::new(220.0, 260.0),
+        ];
+        let joints = [path[0], path[1], path[2]];
+
+        mesh.rebuild(
+            &path,
+            &joints,
+            Vec4::new(0.1, 0.45, 1.0, 1.0),
+            Vec4::new(0.75, 0.92, 1.0, 1.0),
+            7.0,
+        );
+
+        assert!(!mesh.vertices.is_empty());
+        assert!(!mesh.indices.is_empty());
+        assert!(
+            mesh.indices
+                .iter()
+                .all(|&index| index < mesh.vertices.len() as u32)
+        );
+        assert!(mesh.vertices.iter().any(|vertex| vertex.rubber[1] > 0.95));
+    }
+
+    #[test]
+    fn samples_bent_paths_more_densely_than_straight_paths() {
+        let straight = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(80.0, 0.0),
+            Vec2::new(160.0, 0.0),
+        ];
+        let bent = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(80.0, 0.0),
+            Vec2::new(80.0, 80.0),
+        ];
+
+        assert!(sample_rubber_path(&bent).len() > sample_rubber_path(&straight).len());
     }
 }

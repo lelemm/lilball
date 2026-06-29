@@ -16,7 +16,7 @@ pub mod trail;
 pub mod world;
 
 pub use ball::Ball;
-pub use bounds::Bounds;
+pub use bounds::{BottomEdge, Bounds};
 pub use interaction::{InteractionState, PointerSample};
 pub use particles::{Particle, ParticleKind, ParticleSystem};
 pub use spring::{CursorEntanglement, CursorIntersection, SpringState};
