@@ -21,6 +21,8 @@ pub struct InteractionState {
     pub max_force: f32,
     pub throw_multiplier: f32,
     pub max_speed: f32,
+    pub spin_torque_multiplier: f32,
+    pub max_spin: f32,
     /// How far back (seconds) to integrate cursor motion for throw velocity.
     pub velocity_window: f32,
 
@@ -36,6 +38,8 @@ impl Default for InteractionState {
             max_force: 50_000.0,
             throw_multiplier: 1.0,
             max_speed: 4500.0,
+            spin_torque_multiplier: 1.0,
+            max_spin: 80.0,
             velocity_window: 0.08,
             grab_offset: Vec2::ZERO,
             samples: VecDeque::new(),
@@ -81,6 +85,14 @@ impl InteractionState {
         let accel = force / ball.mass;
         ball.vel += accel * dt;
         ball.pos += ball.vel * dt;
+
+        let contact_dir = (-self.grab_offset).normalize_or_zero();
+        if contact_dir.length_squared() > 0.0 && ball.radius > 1.0 {
+            let contact = contact_dir * ball.radius;
+            let inertia = 0.5 * ball.mass * ball.radius * ball.radius;
+            let torque = contact.perp_dot(force) * ball.friction * self.spin_torque_multiplier;
+            ball.add_spin(torque / inertia * dt, self.max_spin);
+        }
     }
 
     /// Release the ball, imparting the recent weighted cursor velocity.

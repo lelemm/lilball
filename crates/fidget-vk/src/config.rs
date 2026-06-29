@@ -57,6 +57,8 @@ pub struct SimSettings {
     /// Downward gravity in px/s^2 (0 disables gravity).
     pub gravity: f32,
     pub max_speed: f32,
+    /// Cursor speed in px/s required to cut the spring by sweeping across it.
+    pub cut_spring_cursor_speed: f32,
 }
 
 impl Default for SimSettings {
@@ -64,6 +66,7 @@ impl Default for SimSettings {
         Self {
             gravity: 600.0,
             max_speed: 4500.0,
+            cut_spring_cursor_speed: 3600.0,
         }
     }
 }
@@ -110,6 +113,7 @@ impl Settings {
         WorldConfig {
             gravity: Vec2::new(0.0, self.sim.gravity),
             max_speed: self.sim.max_speed,
+            cut_spring_cursor_speed: self.sim.cut_spring_cursor_speed,
             max_particles: self.visuals.max_particles,
             trail_enabled: self.visuals.trail,
             particles_enabled: self.visuals.particles,

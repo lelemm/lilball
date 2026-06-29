@@ -36,6 +36,7 @@ pub fn resolve_walls_with_bottom(
         ball.pos.x = bounds.left + r;
         ball.vel.x = ball.vel.x.abs() * ball.restitution;
         ball.vel.y *= 1.0 - ball.friction;
+        ball.spin *= 1.0 - ball.friction;
         let n = Vec2::new(1.0, 0.0);
         ball.apply_impact(n, impulse_for(speed));
         impacts.push(Impact {
@@ -50,6 +51,7 @@ pub fn resolve_walls_with_bottom(
         ball.pos.x = bounds.right - r;
         ball.vel.x = -ball.vel.x.abs() * ball.restitution;
         ball.vel.y *= 1.0 - ball.friction;
+        ball.spin *= 1.0 - ball.friction;
         let n = Vec2::new(-1.0, 0.0);
         ball.apply_impact(n, impulse_for(speed));
         impacts.push(Impact {
@@ -64,6 +66,7 @@ pub fn resolve_walls_with_bottom(
         ball.pos.y = bounds.top + r;
         ball.vel.y = ball.vel.y.abs() * ball.restitution;
         ball.vel.x *= 1.0 - ball.friction;
+        ball.spin *= 1.0 - ball.friction;
         let n = Vec2::new(0.0, 1.0);
         ball.apply_impact(n, impulse_for(speed));
         impacts.push(Impact {
@@ -78,6 +81,7 @@ pub fn resolve_walls_with_bottom(
         ball.pos.y = bounds.bottom - r;
         ball.vel.y = -ball.vel.y.abs() * ball.restitution;
         ball.vel.x *= 1.0 - ball.friction;
+        ball.spin *= 1.0 - ball.friction;
         let n = Vec2::new(0.0, -1.0);
         ball.apply_impact(n, impulse_for(speed));
         impacts.push(Impact {

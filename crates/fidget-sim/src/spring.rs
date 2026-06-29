@@ -24,7 +24,7 @@ impl CursorEntanglement {
     }
 }
 
-/// Brief spring deflection from the cursor brushing or crossing the string.
+/// Cursor support point that bends the spring while right-click is held.
 #[derive(Debug, Clone, Copy)]
 pub struct CursorIntersection {
     pub point: Vec2,
@@ -36,6 +36,9 @@ pub struct CursorIntersection {
 
 impl CursorIntersection {
     pub fn strength(&self) -> f32 {
+        if !self.max_age.is_finite() {
+            return 1.0;
+        }
         (1.0 - self.age / self.max_age).clamp(0.0, 1.0)
     }
 }
@@ -75,7 +78,7 @@ impl SpringState {
             entanglement: None,
             intersection_capture_radius: 110.0,
             entangle_capture_radius: 72.0,
-            entangle_min_cursor_speed: 850.0,
+            entangle_min_cursor_speed: 2200.0,
         }
     }
 
@@ -106,6 +109,45 @@ impl SpringState {
         self.entanglement = None;
     }
 
+    pub fn clear_cursor_interaction(&mut self) {
+        self.intersection = None;
+        self.entanglement = None;
+    }
+
+    pub fn release_cursor_support(&mut self, ball: &Ball) -> bool {
+        let Some(mut intersection) = self.intersection else {
+            return false;
+        };
+        if intersection.max_age.is_finite() {
+            return true;
+        }
+
+        let to_ball = ball.pos - intersection.point;
+        let spin_tangent = if to_ball.length_squared() > 1.0 {
+            let dir = to_ball.normalize();
+            Vec2::new(-dir.y, dir.x) * ball.spin * ball.radius * 0.25
+        } else {
+            Vec2::ZERO
+        };
+        intersection.cursor_vel = clamp_len(
+            intersection.cursor_vel + ball.vel * 0.25 + spin_tangent,
+            2400.0,
+        );
+
+        let momentum = ball.speed()
+            + ball.spin.abs() * ball.radius * 0.35
+            + intersection.cursor_vel.length() * 0.5;
+        if momentum < 120.0 {
+            self.intersection = None;
+            return false;
+        }
+
+        intersection.age = 0.0;
+        intersection.max_age = (0.8 + momentum / 1500.0).clamp(1.0, 4.5);
+        self.intersection = Some(intersection);
+        true
+    }
+
     pub fn force_on(&self, ball: &Ball) -> Vec2 {
         if !self.attached {
             return Vec2::ZERO;
@@ -122,14 +164,14 @@ impl SpringState {
             return force;
         }
 
-        let mut force = self.base_force_on(ball);
         if let Some(intersection) = self.intersection {
+            let mut force = self.supported_force_on(ball, intersection.point);
             let strength = intersection.strength();
-            force += intersection.displacement * (42.0 * strength);
-            force += intersection.cursor_vel * (0.16 * strength);
+            force += intersection.cursor_vel * (0.08 * strength);
+            return clamp_force(force, self.max_force);
         }
 
-        clamp_force(force, self.max_force)
+        clamp_force(self.base_force_on(ball), self.max_force)
     }
 
     fn base_force_on(&self, ball: &Ball) -> Vec2 {
@@ -143,6 +185,21 @@ impl SpringState {
         let stretch = len - self.rest_length;
         let radial_speed = ball.vel.dot(dir);
         (-self.stiffness * stretch - self.damping * radial_speed) * dir
+    }
+
+    fn supported_force_on(&self, ball: &Ball, support: Vec2) -> Vec2 {
+        let anchor_to_support = support - self.anchor;
+        let support_to_ball = ball.pos - support;
+        let ball_len = support_to_ball.length();
+        if ball_len <= 1e-4 {
+            return Vec2::ZERO;
+        }
+
+        let ball_dir = support_to_ball / ball_len;
+        let path_len = anchor_to_support.length() + ball_len;
+        let stretch = path_len - self.rest_length;
+        let path_speed = ball.vel.dot(ball_dir);
+        (-self.stiffness * stretch - self.damping * path_speed) * ball_dir
     }
 
     pub fn should_recall(&self, ball: &Ball, bounds: Bounds) -> bool {
@@ -162,10 +219,38 @@ impl SpringState {
         clamp_len(impulse, 1800.0)
     }
 
+    pub fn sweep_hits_spring(&self, ball: &Ball, prev_cursor: Vec2, cursor: Vec2) -> bool {
+        if !self.attached {
+            return false;
+        }
+        let spring_hit = segment_distance(prev_cursor, cursor, self.anchor, ball.pos)
+            <= self.entangle_capture_radius;
+        let ball_hit = distance_to_segment(ball.pos, prev_cursor, cursor)
+            <= ball.radius + self.entangle_capture_radius;
+        spring_hit || ball_hit
+    }
+
+    pub fn moving_spring_hits_cursor(
+        &self,
+        ball: &Ball,
+        prev_ball_pos: Vec2,
+        cursor: Vec2,
+    ) -> bool {
+        if !self.attached {
+            return false;
+        }
+
+        let radius = self.entangle_capture_radius;
+        distance_to_segment(cursor, self.anchor, prev_ball_pos) <= radius
+            || distance_to_segment(cursor, self.anchor, ball.pos) <= radius
+            || distance_to_segment(cursor, prev_ball_pos, ball.pos) <= radius
+            || point_in_triangle(cursor, self.anchor, prev_ball_pos, ball.pos)
+    }
+
     pub fn update_intersection_sweep(
         &mut self,
         ball: &Ball,
-        prev_cursor: Vec2,
+        _prev_cursor: Vec2,
         cursor: Vec2,
         cursor_vel: Vec2,
     ) -> bool {
@@ -173,14 +258,17 @@ impl SpringState {
             return false;
         }
 
-        let spring_distance = segment_distance(prev_cursor, cursor, self.anchor, ball.pos);
-        let ball_distance = cursor.distance(ball.pos) - ball.radius;
-        let distance = spring_distance.min(ball_distance.max(0.0));
-        if distance > self.intersection_capture_radius {
-            return false;
+        let already_supported = self.intersection.is_some();
+        let nearest = nearest_point_on_segment(cursor, self.anchor, ball.pos);
+        if !already_supported {
+            let spring_distance = cursor.distance(nearest);
+            let ball_distance = cursor.distance(ball.pos) - ball.radius;
+            let distance = spring_distance.min(ball_distance.max(0.0));
+            if distance > self.intersection_capture_radius {
+                return false;
+            }
         }
 
-        let nearest = nearest_point_on_segment(cursor, self.anchor, ball.pos);
         let mut displacement = cursor - nearest;
         if displacement.length_squared() < 1.0 {
             let spring_dir = (ball.pos - self.anchor).normalize_or_zero();
@@ -192,18 +280,12 @@ impl SpringState {
             };
         }
 
-        let proximity = 1.0 - (distance / self.intersection_capture_radius).clamp(0.0, 1.0);
-        let speed_boost = (cursor_vel.length() / 1400.0).clamp(0.25, 1.0);
-        let strength = proximity * speed_boost;
-        let max_displacement = 130.0 * strength.max(0.2);
-        let displacement = displacement.normalize_or_zero() * max_displacement;
-
         self.intersection = Some(CursorIntersection {
-            point: nearest + displacement * 0.55,
+            point: nearest + displacement,
             displacement,
             cursor_vel,
             age: 0.0,
-            max_age: 0.55 + speed_boost * 0.35,
+            max_age: f32::INFINITY,
         });
         true
     }
@@ -228,10 +310,7 @@ impl SpringState {
             return false;
         }
 
-        let spring_hit = segment_distance(prev_cursor, cursor, self.anchor, ball.pos)
-            <= self.entangle_capture_radius;
-        let ball_hit = cursor.distance(ball.pos) <= ball.radius + self.entangle_capture_radius;
-        if !spring_hit && !ball_hit {
+        if !segments_intersect(prev_cursor, cursor, self.anchor, ball.pos) {
             return false;
         }
 
@@ -266,15 +345,27 @@ impl SpringState {
         true
     }
 
-    pub fn update_transients(&mut self, cursor: Vec2, dt: f32) {
+    pub fn update_transients(&mut self, cursor: Vec2, ball: &Ball, gravity: Vec2, dt: f32) {
         if let Some(mut intersection) = self.intersection {
-            intersection.age += dt;
-            intersection.displacement *= (-dt * 4.8).exp();
-            if intersection.age >= intersection.max_age || intersection.displacement.length() < 1.0
-            {
-                self.intersection = None;
-            } else {
-                self.intersection = Some(intersection);
+            if intersection.max_age.is_finite() {
+                intersection.age += dt;
+                intersection.cursor_vel += gravity * dt;
+                intersection.cursor_vel *= (-dt * 0.85).exp();
+                intersection.point += intersection.cursor_vel * dt;
+
+                let nearest = nearest_point_on_segment(intersection.point, self.anchor, ball.pos);
+                intersection.displacement = intersection.point - nearest;
+
+                let momentum = ball.speed()
+                    + ball.spin.abs() * ball.radius * 0.35
+                    + intersection.cursor_vel.length() * 0.5;
+                if intersection.age >= intersection.max_age
+                    || (intersection.age >= 0.25 && momentum < 90.0)
+                {
+                    self.intersection = None;
+                } else {
+                    self.intersection = Some(intersection);
+                }
             }
         }
 
@@ -336,6 +427,13 @@ fn segments_intersect(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> bool {
     let t = delta.perp_dot(b) / denom;
     let u = delta.perp_dot(a) / denom;
     (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)
+}
+
+fn point_in_triangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
+    let ab = (b - a).perp_dot(p - a);
+    let bc = (c - b).perp_dot(p - b);
+    let ca = (a - c).perp_dot(p - c);
+    (ab >= 0.0 && bc >= 0.0 && ca >= 0.0) || (ab <= 0.0 && bc <= 0.0 && ca <= 0.0)
 }
 
 fn clamp_force(force: Vec2, max: f32) -> Vec2 {

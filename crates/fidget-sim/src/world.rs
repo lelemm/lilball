@@ -31,6 +31,20 @@ pub struct WorldConfig {
     pub sleep_speed: f32,
     /// Seconds of stillness before the ball sleeps.
     pub sleep_delay: f32,
+    /// Cursor sweep speed above which crossing the spring cuts it.
+    pub cut_spring_cursor_speed: f32,
+    /// Effective cursor radius while right-click batting a detached ball.
+    pub cursor_ball_radius: f32,
+    /// Fraction of cursor momentum transferred through a loose-ball hit.
+    pub cursor_ball_momentum_transfer: f32,
+    /// Restitution-like bounce from right-click cursor hits.
+    pub cursor_ball_bounce: f32,
+    /// Per-second damping applied to ball spin.
+    pub spin_drag: f32,
+    /// Sideways acceleration scale from spin while the ball is moving.
+    pub spin_curve: f32,
+    pub max_spin_curve_accel: f32,
+    pub sleep_spin: f32,
 }
 
 impl Default for WorldConfig {
@@ -47,6 +61,14 @@ impl Default for WorldConfig {
             color_outer: Vec4::new(0.1, 0.45, 1.0, 1.0),
             sleep_speed: 5.0,
             sleep_delay: 2.0,
+            cut_spring_cursor_speed: 3600.0,
+            cursor_ball_radius: 18.0,
+            cursor_ball_momentum_transfer: 0.14,
+            cursor_ball_bounce: 0.75,
+            spin_drag: 0.8,
+            spin_curve: 0.024,
+            max_spin_curve_accel: 1800.0,
+            sleep_spin: 0.08,
         }
     }
 }
@@ -66,6 +88,7 @@ pub struct World {
     cursor: Vec2,
     cursor_vel: Vec2,
     cursor_time: Option<f32>,
+    detached_cursor_interaction_active: bool,
     mote_accum: f32,
     nudge_seed: u32,
 }
@@ -89,6 +112,7 @@ impl World {
             spring,
             accumulator: 0.0,
             mote_accum: 0.0,
+            detached_cursor_interaction_active: false,
             nudge_seed: 0x9E37_79B9,
         }
     }
@@ -102,6 +126,7 @@ impl World {
             .wrapping_add(1_013_904_223);
         let angle = (self.nudge_seed >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU;
         self.ball.vel = Vec2::new(angle.cos(), angle.sin()) * speed;
+        self.ball.spin = 0.0;
         self.ball.wake();
     }
 
@@ -146,6 +171,7 @@ impl World {
         self.spring.attach();
         self.ball = Ball::new(self.spring.rest_position(), r);
         self.cursor_vel = Vec2::ZERO;
+        self.detached_cursor_interaction_active = false;
         self.trail.clear();
     }
 
@@ -198,6 +224,7 @@ impl World {
 
     /// Returns true if a grab started (cursor was over the ball).
     pub fn grab(&mut self, cursor: Vec2, now: f32) -> bool {
+        self.update_cursor_sample(cursor, now);
         self.cursor = cursor;
         if InteractionState::hit_test(&self.ball, cursor) {
             self.spring.entanglement = None;
@@ -215,41 +242,62 @@ impl World {
 
     pub fn move_cursor(&mut self, cursor: Vec2, now: f32) {
         let prev_cursor = self.cursor;
-        if let Some(prev_time) = self.cursor_time {
-            let dt = now - prev_time;
-            if dt > 1e-4 {
-                self.cursor_vel = (cursor - self.cursor) / dt;
-            }
+        self.update_cursor_sample(cursor, now);
+        if !self.ball.grabbed && self.should_cut_spring_from_cursor(prev_cursor, cursor) {
+            self.cut_spring();
+            return;
         }
-        self.cursor_time = Some(now);
-        self.cursor = cursor;
         if self.ball.grabbed {
             self.interaction.update_cursor(cursor, now);
-        } else {
-            let displaced = self.spring.update_intersection_sweep(
-                &self.ball,
-                prev_cursor,
-                cursor,
-                self.cursor_vel,
-            );
-            let entangled =
-                self.spring
-                    .try_entangle_sweep(&self.ball, prev_cursor, cursor, self.cursor_vel);
-            if displaced || entangled {
-                self.ball.wake();
+        }
+    }
+
+    pub fn interact_spring(&mut self, cursor: Vec2, now: f32) {
+        let prev_cursor = self.cursor;
+        self.update_cursor_sample(cursor, now);
+        if self.ball.grabbed {
+            self.interaction.update_cursor(cursor, now);
+            return;
+        }
+        if !self.spring.attached {
+            self.detached_cursor_interaction_active = true;
+            let hit = self.bat_detached_ball_with_cursor(prev_cursor, cursor);
+            if hit && self.config.particles_enabled {
+                self.particles
+                    .emit_motes(cursor, self.cursor_vel, 5, self.config.color_outer);
             }
-            if self.config.particles_enabled {
-                let count = if entangled { 10 } else { 3 };
-                if displaced || entangled {
-                    self.particles.emit_motes(
-                        cursor,
-                        self.cursor_vel,
-                        count,
-                        self.config.color_outer,
-                    );
-                }
+            return;
+        }
+
+        let had_support = self.spring.intersection.is_some();
+        let displaced =
+            self.spring
+                .update_intersection_sweep(&self.ball, prev_cursor, cursor, self.cursor_vel);
+        let entangled = !had_support
+            && self
+                .spring
+                .try_entangle_sweep(&self.ball, prev_cursor, cursor, self.cursor_vel);
+        if !displaced {
+            self.spring.intersection = None;
+        }
+        if displaced || entangled {
+            self.ball.wake();
+        }
+        if self.config.particles_enabled {
+            let count = if entangled { 10 } else { 3 };
+            if displaced || entangled {
+                self.particles
+                    .emit_motes(cursor, self.cursor_vel, count, self.config.color_outer);
             }
         }
+    }
+
+    pub fn stop_spring_interaction(&mut self) {
+        self.detached_cursor_interaction_active = false;
+        if !self.spring.release_cursor_support(&self.ball) {
+            self.spring.clear_cursor_interaction();
+        }
+        self.ball.wake();
     }
 
     pub fn release(&mut self, now: f32) {
@@ -267,6 +315,121 @@ impl World {
 
     pub fn is_grabbed(&self) -> bool {
         self.ball.grabbed
+    }
+
+    fn update_cursor_sample(&mut self, cursor: Vec2, now: f32) {
+        if let Some(prev_time) = self.cursor_time {
+            let dt = now - prev_time;
+            if dt > 1e-4 {
+                self.cursor_vel = (cursor - self.cursor) / dt;
+            }
+        }
+        self.cursor_time = Some(now);
+        self.cursor = cursor;
+    }
+
+    fn should_cut_spring_from_cursor(&self, prev_cursor: Vec2, cursor: Vec2) -> bool {
+        self.spring.attached
+            && self.cursor_vel.length() >= self.config.cut_spring_cursor_speed
+            && self
+                .spring
+                .sweep_hits_spring(&self.ball, prev_cursor, cursor)
+    }
+
+    fn bat_detached_ball_with_cursor(&mut self, prev_cursor: Vec2, cursor: Vec2) -> bool {
+        let cursor_speed = self.cursor_vel.length();
+        if cursor_speed < 40.0 && self.ball.speed() < 40.0 {
+            return false;
+        }
+
+        let hit_radius = self.ball.radius + self.config.cursor_ball_radius;
+        let closest = nearest_point_on_segment(self.ball.pos, prev_cursor, cursor);
+        let delta = self.ball.pos - closest;
+        let distance = delta.length();
+        if distance > hit_radius {
+            return false;
+        }
+
+        let normal = if distance > 1.0 {
+            delta / distance
+        } else {
+            self.cursor_vel.normalize_or_zero()
+        };
+        if normal.length_squared() <= 0.0 {
+            return false;
+        }
+
+        let relative_vel = self.cursor_vel - self.ball.vel;
+        let approach = relative_vel.dot(normal);
+        let penetration = (hit_radius - distance).max(0.0);
+        let normal_impulse = normal
+            * (approach.max(0.0) * (1.0 + self.config.cursor_ball_bounce) + penetration * 18.0);
+        let carried_momentum = self.cursor_vel * self.config.cursor_ball_momentum_transfer;
+        self.ball.vel += normal_impulse + carried_momentum;
+        self.ball.vel = clamp_len(self.ball.vel, self.config.max_speed);
+
+        let contact = closest - self.ball.pos;
+        if contact.length_squared() > 4.0 && self.ball.radius > 1.0 {
+            let spin_impulse =
+                contact.perp_dot(relative_vel) / (self.ball.radius * self.ball.radius);
+            self.ball.add_spin(spin_impulse * 0.7, 80.0);
+        }
+
+        self.ball
+            .apply_impact(normal, (normal_impulse.length() / 2500.0).clamp(0.05, 0.6));
+        true
+    }
+
+    fn bat_detached_ball_with_stationary_cursor(&mut self, prev_ball_pos: Vec2) -> bool {
+        if !self.detached_cursor_interaction_active || self.spring.attached {
+            return false;
+        }
+        if self.ball.speed() < 40.0 {
+            return false;
+        }
+
+        let cursor = self.cursor;
+        let hit_radius = self.ball.radius + self.config.cursor_ball_radius;
+        let closest = nearest_point_on_segment(cursor, prev_ball_pos, self.ball.pos);
+        let delta = closest - cursor;
+        let distance = delta.length();
+        if distance > hit_radius {
+            return false;
+        }
+
+        let normal = if distance > 1.0 {
+            delta / distance
+        } else if (prev_ball_pos - cursor).length_squared() > 1.0 {
+            (prev_ball_pos - cursor).normalize()
+        } else {
+            -self.ball.vel.normalize_or_zero()
+        };
+        if normal.length_squared() <= 0.0 {
+            return false;
+        }
+
+        let relative_vel = self.cursor_vel - self.ball.vel;
+        let approach = relative_vel.dot(normal);
+        let penetration = (hit_radius - distance).max(0.0);
+        if approach <= 0.0 && penetration < 1.0 {
+            return false;
+        }
+
+        let normal_impulse = normal
+            * (approach.max(0.0) * (1.0 + self.config.cursor_ball_bounce) + penetration * 18.0);
+        self.ball.vel += normal_impulse;
+        self.ball.vel = clamp_len(self.ball.vel, self.config.max_speed);
+
+        let contact = closest - self.ball.pos;
+        if contact.length_squared() > 4.0 && self.ball.radius > 1.0 {
+            let spin_impulse =
+                contact.perp_dot(relative_vel) / (self.ball.radius * self.ball.radius);
+            self.ball.add_spin(spin_impulse * 0.7, 80.0);
+        }
+
+        self.ball
+            .apply_impact(normal, (normal_impulse.length() / 2500.0).clamp(0.05, 0.6));
+        true
     }
 
     // --- Stepping ----------------------------------------------------------
@@ -291,10 +454,13 @@ impl World {
             self.interaction
                 .apply_spring(&mut self.ball, self.cursor, dt);
         } else if !self.ball.asleep {
-            self.spring.update_transients(self.cursor, dt);
+            self.spring
+                .update_transients(self.cursor, &self.ball, self.config.gravity, dt);
             // Integrate gravity, the anchored spring, and drag.
             let spring_force = self.spring.force_on(&self.ball);
-            self.ball.vel += (self.config.gravity + spring_force / self.ball.mass) * dt;
+            let spin_curve = self.spin_curve_accel();
+            self.ball.vel +=
+                (self.config.gravity + spring_force / self.ball.mass + spin_curve) * dt;
             self.ball.vel *= 1.0 - self.config.air_drag * dt;
             // Clamp speed.
             let sp = self.ball.vel.length();
@@ -302,9 +468,21 @@ impl World {
                 self.ball.vel *= self.config.max_speed / sp;
             }
             self.ball.pos += self.ball.vel * dt;
+            if self.should_cut_spring_from_ball_motion(prev_ball_pos) {
+                self.cut_spring();
+            }
+            if self.bat_detached_ball_with_stationary_cursor(prev_ball_pos)
+                && self.config.particles_enabled
+            {
+                self.particles
+                    .emit_motes(self.cursor, self.ball.vel, 4, self.config.color_outer);
+            }
         }
 
         self.ball.roll_by(self.ball.pos - prev_ball_pos);
+        self.ball.spin_by(dt);
+        self.ball
+            .damp_spin(self.config.spin_drag + self.ball.friction * 2.0, dt);
 
         // Decay the squash impulse.
         self.ball.squash_impulse *= (-dt * 14.0).exp();
@@ -355,11 +533,15 @@ impl World {
 
         // Sleep handling: stop integrating when at rest with no interaction.
         if !self.ball.grabbed {
-            if self.ball.speed() < self.config.sleep_speed && self.config.gravity == Vec2::ZERO {
+            if self.ball.speed() < self.config.sleep_speed
+                && self.ball.spin.abs() < self.config.sleep_spin
+                && self.config.gravity == Vec2::ZERO
+            {
                 self.ball.still_time += dt;
                 if self.ball.still_time > self.config.sleep_delay {
                     self.ball.asleep = true;
                     self.ball.vel = Vec2::ZERO;
+                    self.ball.spin = 0.0;
                 }
             } else {
                 self.ball.still_time = 0.0;
@@ -367,13 +549,59 @@ impl World {
         }
     }
 
+    fn spin_curve_accel(&self) -> Vec2 {
+        let speed = self.ball.speed();
+        if speed < 1.0 || self.ball.spin.abs() < self.config.sleep_spin {
+            return Vec2::ZERO;
+        }
+
+        let dir = self.ball.vel / speed;
+        let side = Vec2::new(-dir.y, dir.x);
+        let accel = self.ball.spin * speed * self.config.spin_curve;
+        side * accel.clamp(
+            -self.config.max_spin_curve_accel,
+            self.config.max_spin_curve_accel,
+        )
+    }
+
+    fn should_cut_spring_from_ball_motion(&self, prev_ball_pos: Vec2) -> bool {
+        self.spring.attached
+            && self.cursor_time.is_some()
+            && self.spring.intersection.is_none()
+            && self.spring.entanglement.is_none()
+            && (self.ball.vel - self.cursor_vel).length() >= self.config.cut_spring_cursor_speed
+            && self
+                .spring
+                .moving_spring_hits_cursor(&self.ball, prev_ball_pos, self.cursor)
+    }
+
     /// Whether anything is visibly animating (used for idle frame pacing).
     pub fn is_active(&self) -> bool {
         self.ball.grabbed
             || self.spring.intersection.is_some()
             || self.spring.entanglement.is_some()
+            || self.ball.spin.abs() >= self.config.sleep_spin
             || !self.ball.asleep
             || !self.particles.is_empty()
             || !self.trail.is_empty()
+    }
+}
+
+fn nearest_point_on_segment(p: Vec2, a: Vec2, b: Vec2) -> Vec2 {
+    let ab = b - a;
+    let denom = ab.length_squared();
+    if denom <= 1e-4 {
+        return a;
+    }
+    let t = (p - a).dot(ab) / denom;
+    a + ab * t.clamp(0.0, 1.0)
+}
+
+fn clamp_len(v: Vec2, max: f32) -> Vec2 {
+    let len = v.length();
+    if len > max && len > 0.0 {
+        v * (max / len)
+    } else {
+        v
     }
 }

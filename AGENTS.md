@@ -5,18 +5,19 @@ and watch bounce around, with motion trails and particles. Inspired by the
 feel of squishy/throwable desktop toys.
 
 The original design targets a Windows always-on-top transparent overlay
-(Win32 + `ash`). **The current code is a Linux build** (winit + `ash`) that
-previews the transparent, borderless overlay look across the full virtual
-desktop where the Linux compositor and Vulkan surface support alpha. The Windows
-shell (click-through, tray, global hotkeys) is a planned port. The simulation
-and renderer are deliberately platform independent so they can be reused there.
+(Win32 + `ash`). The current code keeps a Linux preview shell (winit + `ash`)
+and uses a native Win32 shell on Windows for topmost transparent overlay
+windowing, per-object click-through, tray menu actions, and global hotkeys. The
+simulation and renderer are deliberately platform independent so both shells can
+reuse them.
 
 ## Workspace layout
 
 - `crates/fidget-sim` — platform-independent simulation (ball physics, wall
   collisions, drag/throw interaction, particles, motion trail). Pure Rust, no
   graphics or OS dependencies, fully unit tested.
-- `crates/fidget-vk` — the app: `winit` window + input, `ash` Vulkan renderer.
+- `crates/fidget-vk` — the app: Linux `winit` shell, native Win32 shell, and
+  shared `ash` Vulkan renderer.
 - `shaders/` — GLSL compiled to SPIR-V at build time by `build.rs`.
 
 ## Build / test / run
@@ -27,11 +28,12 @@ and renderer are deliberately platform independent so they can be reused there.
 - Headless physics demo (no GPU needed): `cargo run -p fidget-sim --bin sim_demo`.
 - Run the GUI app: `cargo run -p fidget-vk` (or `./target/release/fidget-vk`).
 
-In-app controls: left-drag to grab/throw the ball, pass the cursor near the
-spring to displace it, sweep quickly across the spring to briefly entangle it,
-right-click or `C` to cut/recall the spring, `N` to fling it in a random
-direction, `G` to toggle gravity, `H` to show/hide the egui parameter HUD,
-`R`/`Space` to reset, `Esc` to quit. The HUD exposes gravity, string
+In-app controls: left-drag to grab/throw the ball, hold right-click near the
+spring to grab/deflect it, sweep very quickly while holding right-click to
+briefly entangle it, sweep very quickly across the spring to cut it, `C` to
+cut/recall the spring, `N` to fling it in a random direction, `G` to toggle
+gravity, `H` to show/hide the egui parameter HUD, `R`/`Space` to reset, `Esc`
+to quit. The HUD exposes gravity, string
 elasticity/stiffness, damping, and hook Y offset, including explicit Hook higher
 / Hook lower buttons; negative hook offset places the string hook off-screen
 above the desktop.
@@ -61,4 +63,4 @@ above the desktop.
   winit X11/Wayland libs (`libxkbcommon-*`, `libx11-dev`, `libxcb1-dev`,
   `libxrandr-dev`, `libxi-dev`, `libwayland-dev`), and a Rust toolchain
   **>= 1.85** (deps such as `wayland-protocols` require edition 2024). The
-  `mingw-w64` cross toolchain is installed for the eventual Windows port.
+  `mingw-w64` cross toolchain is installed for Windows cross-builds.

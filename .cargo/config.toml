@@ -1,9 +1,9 @@
-# The current app can build for Linux and Windows. The Windows-specific overlay
-# shell (Win32 click-through, tray, global hotkeys) is still planned, but the
-# winit/ash preview app cross-compiles to a Windows .exe from Linux/WSL.
+# The app can build for Linux and Windows. Linux uses the winit/ash preview
+# shell; Windows uses the native Win32 overlay shell (click-through, tray,
+# global hotkeys) around the same ash renderer.
 #
-# `fidget-sim` is platform independent; `fidget-vk` uses winit + ash (Vulkan)
-# which build natively on Linux.
+# `fidget-sim` is platform independent; `fidget-vk` keeps platform shell code
+# target-scoped so both native and cross builds stay supported.
 #
 # Cross-compiling from Linux/WSL uses the mingw linker below plus:
 #   rustup target add x86_64-pc-windows-gnu

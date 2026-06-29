@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Vulkan-rendered desktop fidget toy (Linux build; Windows overlay port planned)."
+description = "Vulkan-rendered desktop fidget toy with Linux preview and native Win32 overlay shells."
 default-run = "fidget-vk"
 
 [dependencies]
@@ -12,7 +12,6 @@ fidget-sim = { path = "../fidget-sim" }
 ash = { version = "0.38", features = ["loaded"] }
 ash-window = "0.13"
 raw-window-handle = "0.6"
-winit = "0.30"
 glam.workspace = true
 log.workspace = true
 env_logger = "0.11"
@@ -22,8 +21,21 @@ serde_json.workspace = true
 directories = "5"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 egui = "0.33"
-egui-winit = "0.33"
 egui-ash-renderer = "0.11.0"
+
+[target.'cfg(not(windows))'.dependencies]
+winit = "0.30"
+egui-winit = "0.33"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 anyhow.workspace = true

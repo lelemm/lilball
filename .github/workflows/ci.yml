@@ -76,8 +76,8 @@ jobs:
             - Vulkan-capable GPU driver/runtime
             - Linux desktop session with X11 or Wayland support
 
-          This is the Linux preview overlay. The Windows-specific shell
-          (click-through, tray, global hotkeys) is still planned.
+          This is the Linux preview overlay. Windows packages use the native
+          Win32 shell for click-through, tray, and global hotkeys.
           EOF
           chmod +x "dist/$package/fidget-vk"
           (cd dist && zip -r "$package.zip" "$package")
@@ -134,7 +134,7 @@ jobs:
           Copy-Item "target/release/fidget-vk.exe" "dist/$package/"
           Copy-Item "LICENSE" "dist/$package/"
           @"
-          Fidget-VK Windows preview
+          Fidget-VK Windows overlay
 
           Run:
             fidget-vk.exe
@@ -142,9 +142,8 @@ jobs:
           Requirements:
             - Vulkan-capable GPU driver/runtime
 
-          This is the Windows build of the current winit/ash preview app.
-          The Windows-specific shell (click-through, tray, global hotkeys)
-          is still planned.
+          This is the native Win32 overlay shell with per-object
+          click-through, tray menu actions, and Ctrl+Alt global hotkeys.
           "@ | Set-Content "dist/$package/README.txt"
           Compress-Archive -Path "dist/$package/*" -DestinationPath "dist/$package.zip" -Force
 
@@ -193,7 +192,7 @@ jobs:
           cp target/x86_64-pc-windows-gnu/release/fidget-vk.exe "dist/$package/"
           cp LICENSE "dist/$package/"
           cat > "dist/$package/README.txt" <<'EOF'
-          Fidget-VK Windows preview (cross-built from Linux)
+          Fidget-VK Windows overlay (cross-built from Linux)
 
           Run:
             fidget-vk.exe
@@ -201,7 +200,8 @@ jobs:
           Requirements:
             - Vulkan-capable GPU driver/runtime
 
-          This package verifies the Linux/WSL cross-compilation path.
+          This package verifies the Linux/WSL cross-compilation path for the
+          native Win32 overlay shell.
           EOF
           (cd dist && zip -r "$package.zip" "$package")
 

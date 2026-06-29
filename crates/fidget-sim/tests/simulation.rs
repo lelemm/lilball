@@ -169,8 +169,8 @@ fn slow_cursor_sweep_does_not_entangle_spring() {
     let mut world = no_gravity_world();
     let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
 
-    world.move_cursor(spring_mid + Vec2::new(-30.0, 0.0), 0.0);
-    world.move_cursor(spring_mid + Vec2::new(30.0, 0.0), 0.25);
+    world.interact_spring(spring_mid + Vec2::new(-30.0, 0.0), 0.0);
+    world.interact_spring(spring_mid + Vec2::new(30.0, 0.0), 0.25);
 
     assert!(world.spring.entanglement.is_none());
     assert!(
@@ -183,8 +183,8 @@ fn slow_cursor_sweep_does_not_entangle_spring() {
 fn cursor_intersection_moves_ball_without_entangling() {
     let mut world = no_gravity_world();
     let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
-    world.move_cursor(spring_mid + Vec2::new(-55.0, 0.0), 0.0);
-    world.move_cursor(spring_mid + Vec2::new(55.0, 0.0), 0.22);
+    world.interact_spring(spring_mid + Vec2::new(-55.0, 0.0), 0.0);
+    world.interact_spring(spring_mid + Vec2::new(55.0, 0.0), 0.22);
     assert!(world.spring.intersection.is_some());
     assert!(world.spring.entanglement.is_none());
 
@@ -201,11 +201,194 @@ fn cursor_intersection_moves_ball_without_entangling() {
 }
 
 #[test]
+fn slow_right_click_hold_deflects_without_entangling() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    for i in 0..8 {
+        let t = i as f32 / 7.0;
+        let cursor = spring_mid + Vec2::new(-35.0 + 70.0 * t, 18.0);
+        world.interact_spring(cursor, i as f32 * 0.08);
+    }
+
+    assert!(world.spring.intersection.is_some());
+    assert!(world.spring.entanglement.is_none());
+}
+
+#[test]
+fn right_click_side_support_persists_while_held() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    let cursor = spring_mid + Vec2::new(-72.0, 18.0);
+
+    world.interact_spring(cursor, 0.0);
+
+    let support = world
+        .spring
+        .intersection
+        .expect("right-click near the spring should create a support point");
+    assert!(world.spring.entanglement.is_none());
+    assert!(support.point.x < spring_mid.x - 50.0);
+    assert_relative_eq!(support.point.x, cursor.x, epsilon = 0.01);
+    assert_relative_eq!(support.point.y, cursor.y, epsilon = 0.01);
+
+    for _ in 0..120 {
+        world.advance(FIXED_DT);
+    }
+
+    let held_support = world
+        .spring
+        .intersection
+        .expect("held right-click support should not fade out while held");
+    assert_relative_eq!(held_support.point.x, support.point.x, epsilon = 0.01);
+    assert_relative_eq!(held_support.point.y, support.point.y, epsilon = 0.01);
+    assert!(held_support.strength() > 0.99);
+    assert!(world.spring.entanglement.is_none());
+}
+
+#[test]
+fn right_click_support_follows_cursor_across_screen() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    let start_x = world.ball.pos.x;
+
+    world.interact_spring(spring_mid + Vec2::new(-60.0, 0.0), 0.0);
+    assert!(world.spring.intersection.is_some());
+
+    let far_cursor = Vec2::new(world.bounds.right - 30.0, world.ball.pos.y);
+    world.interact_spring(far_cursor, 0.2);
+
+    let support = world
+        .spring
+        .intersection
+        .expect("latched right-click support should follow the cursor across the screen");
+    assert_relative_eq!(support.point.x, far_cursor.x, epsilon = 0.01);
+    assert_relative_eq!(support.point.y, far_cursor.y, epsilon = 0.01);
+    assert!(world.spring.entanglement.is_none());
+
+    for _ in 0..80 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        world.ball.pos.x > start_x + 80.0,
+        "far cursor support should pull the ball across the screen, start_x={start_x}, pos={:?}",
+        world.ball.pos
+    );
+    assert!(world.spring.entanglement.is_none());
+}
+
+#[test]
+fn released_right_click_support_persists_until_momentum_drops() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    let cursor = spring_mid + Vec2::new(180.0, 80.0);
+
+    world.interact_spring(spring_mid + Vec2::new(-60.0, 0.0), 0.0);
+    world.interact_spring(cursor, 0.15);
+    let held_support = world
+        .spring
+        .intersection
+        .expect("right-click should latch a spring support");
+    world.ball.vel = Vec2::new(700.0, 120.0);
+    world.ball.spin = 12.0;
+
+    world.stop_spring_interaction();
+
+    let released_support = world
+        .spring
+        .intersection
+        .expect("release should keep a moving support pinned temporarily");
+    assert!(released_support.max_age.is_finite());
+    assert!(released_support.cursor_vel.length() > 100.0);
+    assert_relative_eq!(
+        released_support.point.x,
+        held_support.point.x,
+        epsilon = 0.01
+    );
+    assert_relative_eq!(
+        released_support.point.y,
+        held_support.point.y,
+        epsilon = 0.01
+    );
+
+    for _ in 0..20 {
+        world.advance(FIXED_DT);
+    }
+    let still_supported = world
+        .spring
+        .intersection
+        .expect("released support should survive while momentum remains");
+    assert!(
+        still_supported.point.distance(held_support.point) > 20.0,
+        "released support should keep moving with inertia, held={:?}, supported={:?}",
+        held_support.point,
+        still_supported.point
+    );
+
+    world.spring.stiffness = 0.0;
+    world.spring.damping = 0.0;
+    world.ball.vel = Vec2::ZERO;
+    world.ball.spin = 0.0;
+    if let Some(intersection) = world.spring.intersection.as_mut() {
+        intersection.cursor_vel = Vec2::ZERO;
+    }
+    for _ in 0..40 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        world.spring.intersection.is_none(),
+        "released support should clear after speed and spin fall away"
+    );
+}
+
+#[test]
+fn released_right_click_support_falls_with_gravity() {
+    let mut world = World::new(
+        WorldConfig::default(),
+        Bounds::new(0.0, 0.0, 1000.0, 1200.0),
+    );
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+    world.interact_spring(spring_mid + Vec2::new(60.0, 0.0), 0.0);
+    if let Some(intersection) = world.spring.intersection.as_mut() {
+        intersection.cursor_vel = Vec2::ZERO;
+    }
+    let held_support = world
+        .spring
+        .intersection
+        .expect("right-click should latch a spring support");
+    world.ball.vel = Vec2::new(360.0, 0.0);
+
+    world.stop_spring_interaction();
+
+    for _ in 0..30 {
+        world.advance(FIXED_DT);
+    }
+
+    let fallen_support = world
+        .spring
+        .intersection
+        .expect("released support should remain while gravity acts on it");
+    assert!(
+        fallen_support.point.y > held_support.point.y + 8.0,
+        "released support should fall under gravity, held={:?}, fallen={:?}",
+        held_support.point,
+        fallen_support.point
+    );
+    assert!(
+        fallen_support.cursor_vel.y > 80.0,
+        "gravity should add downward velocity to the support, vel={:?}",
+        fallen_support.cursor_vel
+    );
+}
+
+#[test]
 fn cutting_displaced_spring_kicks_ball() {
     let mut world = no_gravity_world();
     let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
-    world.move_cursor(spring_mid + Vec2::new(-80.0, 0.0), 0.0);
-    world.move_cursor(spring_mid + Vec2::new(80.0, 0.0), 0.32);
+    world.interact_spring(spring_mid + Vec2::new(-80.0, 0.0), 0.0);
+    world.interact_spring(spring_mid + Vec2::new(80.0, 0.0), 0.32);
     assert!(world.spring.intersection.is_some());
     assert!(world.spring.entanglement.is_none());
 
@@ -222,10 +405,11 @@ fn cutting_displaced_spring_kicks_ball() {
 #[test]
 fn fast_cursor_sweep_entangles_spring() {
     let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 10_000.0;
     let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
 
-    world.move_cursor(spring_mid + Vec2::new(-140.0, 0.0), 0.0);
-    world.move_cursor(spring_mid + Vec2::new(140.0, 0.0), 0.04);
+    world.interact_spring(spring_mid + Vec2::new(-180.0, 0.0), 0.0);
+    world.interact_spring(spring_mid + Vec2::new(180.0, 0.0), 0.06);
 
     assert!(
         world.spring.entanglement.is_some(),
@@ -236,9 +420,10 @@ fn fast_cursor_sweep_entangles_spring() {
 #[test]
 fn entanglement_pushes_ball_around_cursor() {
     let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 10_000.0;
     let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
-    world.move_cursor(spring_mid + Vec2::new(-140.0, 0.0), 0.0);
-    world.move_cursor(spring_mid + Vec2::new(140.0, 0.0), 0.04);
+    world.interact_spring(spring_mid + Vec2::new(-180.0, 0.0), 0.0);
+    world.interact_spring(spring_mid + Vec2::new(180.0, 0.0), 0.06);
 
     let x0 = world.ball.pos.x;
     for _ in 0..30 {
@@ -256,9 +441,10 @@ fn entanglement_pushes_ball_around_cursor() {
 #[test]
 fn cursor_entanglement_expires() {
     let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 10_000.0;
     let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
-    world.move_cursor(spring_mid + Vec2::new(-140.0, 0.0), 0.0);
-    world.move_cursor(spring_mid + Vec2::new(140.0, 0.0), 0.04);
+    world.interact_spring(spring_mid + Vec2::new(-180.0, 0.0), 0.0);
+    world.interact_spring(spring_mid + Vec2::new(180.0, 0.0), 0.06);
     assert!(world.spring.entanglement.is_some());
 
     for _ in 0..360 {
@@ -266,6 +452,195 @@ fn cursor_entanglement_expires() {
     }
 
     assert!(world.spring.entanglement.is_none());
+    assert!(world.spring_attached());
+}
+
+#[test]
+fn passive_cursor_sweep_does_not_affect_spring() {
+    let mut world = no_gravity_world();
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid + Vec2::new(-140.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(140.0, 0.0), 0.04);
+
+    assert!(world.spring.intersection.is_none());
+    assert!(world.spring.entanglement.is_none());
+}
+
+#[test]
+fn passive_cursor_sweep_does_not_bat_detached_ball() {
+    let mut world = no_gravity_world();
+    world.cut_spring();
+    let center = world.ball.pos;
+
+    world.move_cursor(center + Vec2::new(-220.0, 0.0), 0.0);
+    world.move_cursor(center + Vec2::new(40.0, 0.0), 0.05);
+
+    assert_relative_eq!(world.ball.vel.length(), 0.0, epsilon = 0.01);
+}
+
+#[test]
+fn right_click_cursor_bats_detached_ball() {
+    let mut world = no_gravity_world();
+    world.cut_spring();
+    let center = world.ball.pos;
+
+    world.interact_spring(center + Vec2::new(-220.0, 0.0), 0.0);
+    world.interact_spring(center + Vec2::new(40.0, 0.0), 0.05);
+
+    assert!(
+        world.ball.vel.x > 1000.0,
+        "right-click cursor hit should transfer x momentum, vel={:?}",
+        world.ball.vel
+    );
+    assert!(world.ball.vel.y.abs() < 50.0, "vel={:?}", world.ball.vel);
+    assert!(!world.spring_attached());
+}
+
+#[test]
+fn detached_ball_bounces_off_stationary_right_click_cursor() {
+    let mut world = no_gravity_world();
+    world.cut_spring();
+    let cursor = world.ball.pos;
+    world.ball.pos = cursor + Vec2::new(-100.0, 0.0);
+    world.ball.vel = Vec2::new(1200.0, 0.0);
+
+    world.interact_spring(cursor, 0.0);
+    for _ in 0..12 {
+        world.advance(FIXED_DT);
+        if world.ball.vel.x < 0.0 {
+            break;
+        }
+    }
+
+    assert!(
+        world.ball.vel.x < -500.0,
+        "stationary right-click cursor should bounce the loose ball, vel={:?}",
+        world.ball.vel
+    );
+}
+
+#[test]
+fn detached_ball_does_not_bounce_after_right_click_release() {
+    let mut world = no_gravity_world();
+    world.cut_spring();
+    let cursor = world.ball.pos;
+    world.ball.pos = cursor + Vec2::new(-100.0, 0.0);
+    world.ball.vel = Vec2::new(1200.0, 0.0);
+
+    world.interact_spring(cursor, 0.0);
+    world.stop_spring_interaction();
+    for _ in 0..12 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        world.ball.vel.x > 900.0,
+        "released right-click cursor should not keep bouncing the loose ball, vel={:?}",
+        world.ball.vel
+    );
+}
+
+#[test]
+fn glancing_right_click_hit_spins_detached_ball() {
+    let mut world = no_gravity_world();
+    world.cut_spring();
+    let center = world.ball.pos;
+    let sweep_y = -world.ball.radius * 0.75;
+
+    world.interact_spring(center + Vec2::new(-220.0, sweep_y), 0.0);
+    world.interact_spring(center + Vec2::new(40.0, sweep_y), 0.05);
+
+    assert!(
+        world.ball.vel.x > 500.0,
+        "glancing hit should carry cursor momentum, vel={:?}",
+        world.ball.vel
+    );
+    assert!(
+        world.ball.spin.abs() > 5.0,
+        "glancing hit should spin the loose ball, spin={}",
+        world.ball.spin
+    );
+}
+
+#[test]
+fn stopping_spring_interaction_clears_cursor_effects() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 10_000.0;
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.interact_spring(spring_mid + Vec2::new(-180.0, 0.0), 0.0);
+    world.interact_spring(spring_mid + Vec2::new(180.0, 0.0), 0.06);
+    assert!(world.spring.entanglement.is_some());
+
+    world.stop_spring_interaction();
+
+    assert!(world.spring.intersection.is_none());
+    assert!(world.spring.entanglement.is_none());
+}
+
+#[test]
+fn very_fast_cursor_sweep_cuts_spring() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 3000.0;
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid + Vec2::new(-180.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(180.0, 0.0), 0.04);
+
+    assert!(!world.spring_attached());
+}
+
+#[test]
+fn very_fast_right_click_sweep_does_not_cut_spring() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 3000.0;
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.interact_spring(spring_mid + Vec2::new(-180.0, 0.0), 0.0);
+    world.interact_spring(spring_mid + Vec2::new(180.0, 0.0), 0.04);
+
+    assert!(world.spring_attached());
+}
+
+#[test]
+fn slow_cursor_sweep_does_not_cut_spring() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 3000.0;
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid + Vec2::new(-120.0, 0.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(120.0, 0.0), 0.5);
+
+    assert!(world.spring_attached());
+}
+
+#[test]
+fn stationary_cursor_cuts_fast_moving_spring() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 3000.0;
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid, 0.0);
+    world.ball.vel = Vec2::new(3600.0, 0.0);
+    world.advance(FIXED_DT);
+
+    assert!(
+        !world.spring_attached(),
+        "fast ball motion relative to a stationary cursor should cut the spring"
+    );
+}
+
+#[test]
+fn stationary_cursor_does_not_cut_slow_moving_spring() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 3000.0;
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid, 0.0);
+    world.ball.vel = Vec2::new(1200.0, 0.0);
+    world.advance(FIXED_DT);
+
     assert!(world.spring_attached());
 }
 
@@ -304,6 +679,92 @@ fn throw_imparts_velocity_in_drag_direction() {
     // Thrown roughly along the drag direction.
     assert!(world.ball.vel.x > 100.0, "vx={}", world.ball.vel.x);
     assert!(world.ball.vel.y < -50.0, "vy={}", world.ball.vel.y);
+}
+
+#[test]
+fn off_center_fast_drag_builds_spin() {
+    let mut world = no_gravity_world();
+    world.cut_spring();
+    let start = world.ball.pos;
+    let grab = start + Vec2::new(0.0, -world.ball.radius * 0.6);
+    let drag_vel = Vec2::new(1800.0, 0.0);
+    let mut now = 0.0;
+
+    assert!(world.grab(grab, now));
+    for _ in 0..12 {
+        now += 0.01;
+        world.move_cursor(grab + drag_vel * now, now);
+        world.advance(0.01);
+    }
+
+    assert!(
+        world.ball.spin > 2.0,
+        "off-center fast drag should spin the ball, spin={}",
+        world.ball.spin
+    );
+}
+
+#[test]
+fn spin_curves_released_ball() {
+    let cfg = WorldConfig {
+        gravity: Vec2::ZERO,
+        ..WorldConfig::default()
+    };
+    let mut world = World::new(cfg, Bounds::new(0.0, 0.0, 4000.0, 1200.0));
+    world.cut_spring();
+    let start = world.ball.pos;
+    let grab = start + Vec2::new(0.0, -world.ball.radius * 0.7);
+    let drag_vel = Vec2::new(2200.0, 0.0);
+    let mut now = 0.0;
+
+    assert!(world.grab(grab, now));
+    for _ in 0..14 {
+        now += 0.01;
+        world.move_cursor(grab + drag_vel * now, now);
+        world.advance(0.01);
+    }
+    world.release(now);
+
+    let release_y = world.ball.pos.y;
+    assert!(world.ball.spin > 4.0, "spin={}", world.ball.spin);
+    assert!(
+        world.ball.vel.y.abs() < 1.0,
+        "release velocity should start straight enough to isolate spin, vel={:?}",
+        world.ball.vel
+    );
+
+    for _ in 0..80 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        world.ball.pos.y > release_y + 18.0,
+        "positive spin should curve the rightward throw downward, y0={release_y}, pos={:?}",
+        world.ball.pos
+    );
+}
+
+#[test]
+fn spin_falls_off_and_allows_sleep() {
+    let mut world = no_gravity_world();
+    world.cut_spring();
+    world.ball.spin = 24.0;
+    let initial_spin = world.ball.spin;
+
+    for _ in 0..120 {
+        world.advance(FIXED_DT);
+    }
+    assert!(
+        world.ball.spin.abs() < initial_spin,
+        "spin should be damped by friction, spin={}",
+        world.ball.spin
+    );
+
+    for _ in 0..1100 {
+        world.advance(FIXED_DT);
+    }
+    assert_relative_eq!(world.ball.spin, 0.0, epsilon = 0.001);
+    assert!(world.ball.asleep, "ball should sleep after spin fades");
 }
 
 #[test]

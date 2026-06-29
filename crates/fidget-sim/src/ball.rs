@@ -20,6 +20,9 @@ pub struct Ball {
     pub roll_angle: f32,
     /// Last non-zero movement direction used to orient the rolling texture.
     pub roll_dir: Vec2,
+    /// Screen-space angular velocity in radians/second. Positive values curve
+    /// left of the current travel direction.
+    pub spin: f32,
     /// Seconds the ball has been (nearly) still; used to drive sleep.
     pub still_time: f32,
     pub asleep: bool,
@@ -39,6 +42,7 @@ impl Ball {
             squash_dir: Vec2::Y,
             roll_angle: 0.0,
             roll_dir: Vec2::X,
+            spin: 0.0,
             still_time: 0.0,
             asleep: false,
         }
@@ -83,6 +87,27 @@ impl Ball {
         self.roll_dir = delta / distance;
         self.roll_angle =
             (self.roll_angle + distance / self.radius).rem_euclid(std::f32::consts::TAU);
+    }
+
+    pub fn spin_by(&mut self, dt: f32) {
+        if self.spin.abs() <= 0.001 {
+            return;
+        }
+        self.roll_angle = (self.roll_angle + self.spin * dt).rem_euclid(std::f32::consts::TAU);
+    }
+
+    pub fn damp_spin(&mut self, drag: f32, dt: f32) {
+        self.spin *= (-drag.max(0.0) * dt).exp();
+        if self.spin.abs() < 0.01 {
+            self.spin = 0.0;
+        }
+    }
+
+    pub fn add_spin(&mut self, impulse: f32, max_spin: f32) {
+        self.spin = (self.spin + impulse).clamp(-max_spin, max_spin);
+        if self.spin.abs() > 0.01 {
+            self.wake();
+        }
     }
 
     pub fn wake(&mut self) {
