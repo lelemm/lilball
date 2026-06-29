@@ -1,0 +1,101 @@
+name: Release Win32
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-pc-windows-gnu
+  PACKAGE: fidget-vk-win32-x86_64-gnu
+
+jobs:
+  win32:
+    name: Build Win32 x86_64 GNU package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: win32-x86_64-gnu
+
+      - name: Install Win32 cross-build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils-mingw-w64-x86-64 \
+            gcc-mingw-w64-x86-64 \
+            glslang-tools \
+            mingw-w64 \
+            zip
+
+      - name: Test simulation
+        run: cargo test --locked -p fidget-sim
+
+      - name: Build Win32 release
+        run: cargo build --locked --release -p fidget-vk --target "$TARGET"
+
+      - name: Audit imported DLLs
+        run: |
+          exe="target/$TARGET/release/fidget-vk.exe"
+          mkdir -p dist
+          x86_64-w64-mingw32-objdump -p "$exe" \
+            | awk '/DLL Name:/ { print $3 }' \
+            | sort -u \
+            | tee dist/win32-dll-imports.txt
+
+          if grep -Eiq '^(libgcc_s|libstdc\+\+|libwinpthread)' dist/win32-dll-imports.txt; then
+            echo "Unexpected MinGW runtime DLL import detected."
+            echo "Vendor the required DLL beside the exe or adjust the build before releasing."
+            exit 1
+          fi
+
+      - name: Package Win32 release
+        run: |
+          exe="target/$TARGET/release/fidget-vk.exe"
+          package_dir="dist/$PACKAGE"
+          mkdir -p "$package_dir"
+          cp "$exe" "$package_dir/"
+          cp LICENSE "$package_dir/"
+          cp dist/win32-dll-imports.txt "$package_dir/"
+          cat > "$package_dir/README.txt" <<'EOF'
+          Fidget-VK Win32 overlay
+
+          Run:
+            fidget-vk.exe
+
+          Requirements:
+            - Windows x86_64
+            - Vulkan-capable GPU driver/runtime
+
+          This package is cross-built from Linux for x86_64-pc-windows-gnu.
+          The DLL import audit is included as win32-dll-imports.txt. At the
+          time of packaging, no non-system MinGW runtime DLLs are required.
+          EOF
+          (cd dist && zip -r "$PACKAGE.zip" "$PACKAGE")
+
+      - name: Upload Win32 package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fidget-vk-win32-x86_64-gnu
+          path: dist/fidget-vk-win32-x86_64-gnu.zip
+          if-no-files-found: error
+
+      - name: Upload Win32 package to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/fidget-vk-win32-x86_64-gnu.zip
