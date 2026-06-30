@@ -1,16 +1,36 @@
 # Fidget-VK
 
-Fidget-VK is a Vulkan-rendered desktop fidget toy with two play modes: a textured
-ball hanging from a spring that can be dragged, thrown, cut loose, recalled, and
-tangled with the cursor, and a **Marbles** mode where procedural glass marbles
-bounce around the desktop, collide with each other, crack on hard impacts, and
-shatter into glass flecks.
+**Your desktop is the playground.**
 
-The app has a Linux transparent overlay preview built with Rust, winit,
-ash/Vulkan, and egui. On Windows it now uses a native Win32 shell for the
-original desktop-overlay behavior: topmost transparent windowing, per-object
-click-through, a tray menu, and global hotkeys around the same simulation and
-Vulkan renderer.
+Fidget-VK sits on top of your wallpaper like a toy left on the table — always
+there, always ready to mess with between tabs. No levels, no score, no timer.
+Just satisfying physics you can poke at while the rest of your day happens
+underneath.
+
+## Fidget
+
+A ball hangs from a spring anchored somewhere above the screen. Grab it and
+throw it. Watch it bounce off the edges. Cut the string and let it drop into the
+pit, then call it back. Hold right-click near the spring and push the line
+around. Sweep fast enough and the cursor snags the string for a moment; sweep
+even faster and you slice right through it.
+
+Tune gravity, stiffness, and damping from the HUD until the swing feels exactly
+right — heavy and lazy, or tight and snappy. Swap the string for a rubber band.
+Fling it with `N` when you want chaos.
+
+## Marbles
+
+Press `P` and the spring toy steps aside. Your wallpaper becomes a marble table.
+
+Spawn glass marbles — each one unique — and let them roll, collide, and spin
+across the desktop. Grab one and throw it. Kick the pile with a right-click
+sweep. Hit a wall hard enough and cracks spread across the surface; hit it harder
+and the marble shatters into glass flecks. Scatter the lot with `N` and watch
+the storm settle.
+
+On Windows the toy lives in the system tray and stays out of your way until you
+want it. On Linux it runs as a transparent full-screen overlay preview.
 
 ## Screenshots
 
@@ -37,39 +57,6 @@ Vulkan renderer.
 ### Marbles scatter
 
 ![Marbles after a scatter fling](docs/images/marbles-scatter.png)
-
-## Features
-
-- Full-desktop transparent Linux overlay preview.
-- Vulkan rendering through `ash`.
-- Image-backed soccer ball material with shader lighting and seam relief.
-- Spring physics with gravity, damping, elasticity, and off-screen hook support.
-- Hold right-click near the spring to grab/deflect it and push the ball.
-- Very fast right-click sweeps across the spring can create temporary entanglement.
-- Very fast cursor sweeps across the spring cut it; the threshold is configurable.
-- Cut/recall behavior: release the ball, let it fall, then recall it to the spring.
-- Motion trails, particles, impact sparks, squash/stretch, and glow.
-- **Marbles mode** (`P` or the HUD mode selector):
-  - procedural glass marbles with unique swirl patterns and specular lighting
-  - desktop snapshot backdrop so marbles sit on top of your wallpaper
-  - marble–marble and marble–wall collisions with spin and rolling
-  - left-drag grab/throw and right-click kick/sweep interactions
-  - hard impacts crack marbles; shattered marbles emit glass fleck particles
-  - spawn, scatter, and clear controls in the HUD and tray menu
-  - multi-monitor aware bounds (marbles bounce off visible monitor edges)
-- egui HUD for runtime tuning:
-  - gravity
-  - string elasticity/stiffness
-  - string damping
-  - hook Y offset
-  - reset
-  - cut/recall
-- Native Win32 overlay shell with per-object click-through.
-- Windows tray menu for HUD, mode toggle, marble spawn/scatter/clear, reset,
-  cut/recall, gravity, fling, and quit.
-- Windows global hotkeys for core actions.
-- Linux, native Windows, and Linux-to-Windows cross-build CI.
-- Release packaging for Linux and Windows zip assets.
 
 ## Controls
 
