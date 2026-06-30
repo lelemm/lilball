@@ -1,8 +1,10 @@
 # Fidget-VK
 
-Fidget-VK is a Vulkan-rendered desktop fidget toy: a textured ball hanging from
-a spring that can be dragged, thrown, cut loose, recalled, and tangled with the
-cursor.
+Fidget-VK is a Vulkan-rendered desktop fidget toy with two play modes: a textured
+ball hanging from a spring that can be dragged, thrown, cut loose, recalled, and
+tangled with the cursor, and a **Marbles** mode where procedural glass marbles
+bounce around the desktop, collide with each other, crack on hard impacts, and
+shatter into glass flecks.
 
 The app has a Linux transparent overlay preview built with Rust, winit,
 ash/Vulkan, and egui. On Windows it now uses a native Win32 shell for the
@@ -24,6 +26,18 @@ Vulkan renderer.
 
 ![egui parameter HUD](docs/images/egui-hud.png)
 
+### Marbles mode on the desktop
+
+![Marbles scattered on the desktop](docs/images/marbles-desktop.png)
+
+### Marbles mode HUD
+
+![Marbles mode controls](docs/images/marbles-hud.png)
+
+### Marbles scatter
+
+![Marbles after a scatter fling](docs/images/marbles-scatter.png)
+
 ## Features
 
 - Full-desktop transparent Linux overlay preview.
@@ -35,6 +49,14 @@ Vulkan renderer.
 - Very fast cursor sweeps across the spring cut it; the threshold is configurable.
 - Cut/recall behavior: release the ball, let it fall, then recall it to the spring.
 - Motion trails, particles, impact sparks, squash/stretch, and glow.
+- **Marbles mode** (`P` or the HUD mode selector):
+  - procedural glass marbles with unique swirl patterns and specular lighting
+  - desktop snapshot backdrop so marbles sit on top of your wallpaper
+  - marble–marble and marble–wall collisions with spin and rolling
+  - left-drag grab/throw and right-click kick/sweep interactions
+  - hard impacts crack marbles; shattered marbles emit glass fleck particles
+  - spawn, scatter, and clear controls in the HUD and tray menu
+  - multi-monitor aware bounds (marbles bounce off visible monitor edges)
 - egui HUD for runtime tuning:
   - gravity
   - string elasticity/stiffness
@@ -43,12 +65,23 @@ Vulkan renderer.
   - reset
   - cut/recall
 - Native Win32 overlay shell with per-object click-through.
-- Windows tray menu for HUD, reset, cut/recall, gravity, fling, and quit.
+- Windows tray menu for HUD, mode toggle, marble spawn/scatter/clear, reset,
+  cut/recall, gravity, fling, and quit.
 - Windows global hotkeys for core actions.
 - Linux, native Windows, and Linux-to-Windows cross-build CI.
 - Release packaging for Linux and Windows zip assets.
 
 ## Controls
+
+### Shared
+
+- `P`: toggle Fidget / Marbles mode.
+- `H`: show/hide the HUD.
+- `Esc`: quit.
+- `1` / `2` / `3`: small / medium / large toy size (marble radius range in
+  Marbles mode).
+
+### Fidget mode
 
 - Left drag: grab/throw the ball.
 - Hold right-click near string: grab/deflect the spring.
@@ -57,13 +90,21 @@ Vulkan renderer.
 - `C`: cut/recall the spring.
 - `N`: fling the ball.
 - `G`: toggle gravity.
-- `H`: show/hide the HUD.
 - `R` or `Space`: reset the ball.
-- `Esc`: quit.
+
+### Marbles mode
+
+- Left drag: grab and throw a marble.
+- Hold right-click and sweep: kick marbles (fast sweeps impart more damage).
+- `O`: spawn a marble.
+- `F`: scatter all marbles.
+- `Delete`: clear all marbles.
+- `N`: scatter/fling all marbles.
+- `R` or `Space`: spawn a marble.
 
 On Windows, the same actions are also available from the tray menu. Global
 hotkeys use `Ctrl+Alt` plus the matching key, for example `Ctrl+Alt+H` for the
-HUD and `Ctrl+Alt+Esc` to quit.
+HUD, `Ctrl+Alt+P` to toggle mode, and `Ctrl+Alt+Esc` to quit.
 
 ## Build and test
 
@@ -146,6 +187,7 @@ The Windows cross-build job also uploads:
 Ready:
 
 - Linux transparent overlay preview.
+- Marbles mode with procedural glass marbles and shatter particles.
 - Native Win32 transparent overlay shell.
 - Per-object click-through on Windows.
 - Windows system tray menu.
