@@ -3,7 +3,7 @@
 layout(location = 0) in vec2 v_local;     // [-1,1] quad-local coords
 layout(location = 1) in vec4 v_color;     // rgba (a = intensity)
 layout(location = 2) in float v_softness; // edge softness
-layout(location = 3) in float v_material; // 0 = glow blob, 1 = soccer ball, 2 = dust
+layout(location = 3) in float v_material; // 0 = glow blob, 1 = soccer ball, 2 = dust, 3 = marble floor light
 layout(location = 4) in vec4 v_roll;      // xy = movement axis, z = roll angle
 
 layout(set = 0, binding = 0) uniform sampler2D u_ball_texture;
@@ -66,12 +66,31 @@ vec4 dust_blob(vec2 local) {
     return vec4(v_color.rgb * a, a);
 }
 
+vec4 caustic_blob(vec2 local) {
+    float d = length(local);
+    if (d > 1.0) {
+        discard;
+    }
+
+    vec2 p = local;
+    float broad = pow(1.0 - smoothstep(0.0, 1.0, d), 1.65);
+    float focus = 1.0 - smoothstep(0.08, 0.62, length(p - vec2(0.0, -0.08)));
+    float underside = 1.0 - smoothstep(0.16, 0.92, length(p * vec2(0.82, 1.18)));
+    float intensity = (broad * 0.48 + focus * 0.30 + underside * 0.22) * v_color.a;
+    vec3 color = vec3(1.0, 0.985, 0.94);
+    return vec4(color * intensity, intensity);
+}
+
 void main() {
     if (abs(v_material - 1.0) < 0.25) {
         frag = soccer_ball(v_local);
         return;
     }
-    if (v_material > 1.5) {
+    if (abs(v_material - 3.0) < 0.25) {
+        frag = caustic_blob(v_local);
+        return;
+    }
+    if (abs(v_material - 2.0) < 0.25) {
         frag = dust_blob(v_local);
         return;
     }

@@ -3,11 +3,11 @@
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use fidget_sim::{BottomEdge, Bounds, DEFAULT_RECALL_MARGIN, ParticleKind, World};
+use fidget_sim::{BottomEdge, Bounds, MarbleWorld, ParticleKind, World, DEFAULT_RECALL_MARGIN};
 use glam::{Vec2, Vec3, Vec4};
 
-use crate::config::{Settings, ToySize};
-use crate::renderer::{Instance, RubberBandMesh};
+use crate::config::{PlayMode, Settings, ToySize};
+use crate::renderer::{Instance, MarbleInstance, RubberBandMesh};
 
 const SOCCER_GLOW_TEXTURE_PNG: &[u8] =
     include_bytes!("../../../../assets/soccer_ball_material.png");
@@ -25,12 +25,17 @@ pub(super) enum AppAction {
     ToggleSingleMonitorBounds,
     ToggleHud,
     Nudge,
+    ToggleMode,
+    SpawnMarble,
+    ClearMarbles,
+    ScatterMarbles,
     SetToySize(ToySize),
 }
 
 pub(super) struct Core {
     settings: Settings,
     world: World,
+    marble_world: MarbleWorld,
     start: Instant,
     last_frame: Instant,
     virtual_bounds: Bounds,
@@ -40,13 +45,16 @@ pub(super) struct Core {
     monitor_layout_known: bool,
     cursor: Vec2,
     spring_interaction_active: bool,
+    marble_kick_active: bool,
     instances: Vec<Instance>,
+    marble_instances: Vec<MarbleInstance>,
     rubber_band: RubberBandMesh,
     egui_ctx: egui::Context,
     hud_visible: bool,
     hud_rect: Option<egui::Rect>,
     intro_hint: IntroHint,
     spawn_seed: u32,
+    desktop_snapshot_requested: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -66,9 +74,12 @@ impl Core {
     pub(super) fn new(settings: Settings) -> Self {
         let bounds = Bounds::new(0.0, 0.0, 1280.0, 720.0);
         let world = World::new(settings.world_config(), bounds);
+        let marble_world = MarbleWorld::new(settings.marble_config(), bounds);
+        let desktop_snapshot_requested = settings.mode == PlayMode::Marbles;
         Self {
             settings,
             world,
+            marble_world,
             start: Instant::now(),
             last_frame: Instant::now(),
             virtual_bounds: bounds,
@@ -78,13 +89,16 @@ impl Core {
             monitor_layout_known: false,
             cursor: Vec2::ZERO,
             spring_interaction_active: false,
+            marble_kick_active: false,
             instances: Vec::with_capacity(4096),
+            marble_instances: Vec::with_capacity(512),
             rubber_band: RubberBandMesh::with_capacity(2048, 8192),
             egui_ctx: egui::Context::default(),
             hud_visible: false,
             hud_rect: None,
             intro_hint: IntroHint::default(),
             spawn_seed: 0xA53C_92D1,
+            desktop_snapshot_requested,
         }
     }
 
@@ -94,6 +108,10 @@ impl Core {
 
     pub(super) fn instances(&self) -> &[Instance] {
         &self.instances
+    }
+
+    pub(super) fn marble_instances(&self) -> &[MarbleInstance] {
+        &self.marble_instances
     }
 
     pub(super) fn rubber_band(&self) -> &RubberBandMesh {
@@ -112,12 +130,21 @@ impl Core {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
-        self.world.advance(dt);
+        match self.settings.mode {
+            PlayMode::Fidget => self.world.advance(dt),
+            PlayMode::Marbles => {
+                self.ensure_marble_mode_seeded();
+                self.marble_world.advance(dt);
+            }
+        }
         self.update_intro_hint();
     }
 
     pub(super) fn resize(&mut self, width: u32, height: u32) {
         self.virtual_bounds = Bounds::new(0.0, 0.0, width as f32, height as f32);
+        if self.settings.mode == PlayMode::Marbles {
+            self.desktop_snapshot_requested = true;
+        }
         if !self.monitor_layout_known {
             self.monitor_bounds.clear();
             self.monitor_bounds.push(self.virtual_bounds);
@@ -146,6 +173,9 @@ impl Core {
             self.active_monitor = self.active_monitor.min(self.monitor_bounds.len() - 1);
         }
         self.monitor_layout_known = true;
+        if self.settings.mode == PlayMode::Marbles {
+            self.desktop_snapshot_requested = true;
+        }
         self.apply_monitor_bounds(self.settings.sim.single_monitor_bounds && !had_layout);
     }
 
@@ -188,9 +218,30 @@ impl Core {
         self.settings.sim.single_monitor_bounds
     }
 
+    pub(super) fn play_mode(&self) -> PlayMode {
+        self.settings.mode
+    }
+
+    pub(super) fn take_desktop_snapshot_request(&mut self) -> bool {
+        std::mem::take(&mut self.desktop_snapshot_requested)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn marble_count(&self) -> usize {
+        self.marble_world.marbles.len()
+    }
+
     pub(super) fn on_cursor_moved(&mut self, cursor: Vec2) {
         self.cursor = cursor;
         let now = self.now();
+        if self.settings.mode == PlayMode::Marbles {
+            if self.marble_kick_active && !self.marble_world.is_grabbed() {
+                self.marble_world.kick_cursor(cursor, now);
+            } else {
+                self.marble_world.move_cursor(cursor, now);
+            }
+            return;
+        }
         if self.spring_interaction_active {
             self.world.interact_spring(cursor, now);
             if self.spring_is_cursor_dragged() {
@@ -203,6 +254,9 @@ impl Core {
 
     pub(super) fn on_left_pressed(&mut self) -> bool {
         let now = self.now();
+        if self.settings.mode == PlayMode::Marbles {
+            return self.marble_world.grab(self.cursor, now);
+        }
         let grabbed = self.world.grab(self.cursor, now);
         if grabbed {
             self.start_intro_hint_fade(now);
@@ -212,10 +266,20 @@ impl Core {
 
     pub(super) fn on_left_released(&mut self) {
         let now = self.now();
+        if self.settings.mode == PlayMode::Marbles {
+            self.marble_world.release(now);
+            return;
+        }
         self.world.release(now);
     }
 
     pub(super) fn on_right_pressed(&mut self) {
+        if self.settings.mode == PlayMode::Marbles {
+            let now = self.now();
+            self.marble_kick_active = true;
+            self.marble_world.begin_kick(self.cursor, now);
+            return;
+        }
         self.spring_interaction_active = true;
         let now = self.now();
         self.start_intro_hint_fade(now);
@@ -223,6 +287,10 @@ impl Core {
     }
 
     pub(super) fn on_right_released(&mut self) {
+        if self.settings.mode == PlayMode::Marbles {
+            self.marble_kick_active = false;
+            return;
+        }
         if self.spring_interaction_active {
             self.spring_interaction_active = false;
             self.world.stop_spring_interaction();
@@ -233,9 +301,15 @@ impl Core {
         match action {
             AppAction::Reset => {
                 self.start_intro_hint_fade(self.now());
-                self.spawn_ball_random();
+                match self.settings.mode {
+                    PlayMode::Fidget => self.spawn_ball_random(),
+                    PlayMode::Marbles => self.spawn_marble_random(),
+                }
             }
             AppAction::ToggleSpring => {
+                if self.settings.mode == PlayMode::Marbles {
+                    return;
+                }
                 self.start_intro_hint_fade(self.now());
                 if self.world.ball_visible() {
                     self.world.toggle_spring();
@@ -246,7 +320,11 @@ impl Core {
             AppAction::ToggleSpringVisual => {
                 self.settings.visuals.spring_visual = self.settings.visuals.spring_visual.toggled();
             }
-            AppAction::ToggleGravity => self.world.toggle_gravity(),
+            AppAction::ToggleGravity => {
+                if self.settings.mode == PlayMode::Fidget {
+                    self.world.toggle_gravity();
+                }
+            }
             AppAction::ToggleBottomBounce => {
                 let enabled = !self.world.bottom_bounce_enabled();
                 self.world.set_bottom_bounce_enabled(enabled);
@@ -264,8 +342,18 @@ impl Core {
             AppAction::ToggleHud => self.hud_visible = !self.hud_visible,
             AppAction::Nudge => {
                 self.start_intro_hint_fade(self.now());
-                self.world.nudge(2800.0);
+                match self.settings.mode {
+                    PlayMode::Fidget => self.world.nudge(2800.0),
+                    PlayMode::Marbles => self.marble_world.scatter(2500.0),
+                }
             }
+            AppAction::ToggleMode => self.toggle_mode(),
+            AppAction::SpawnMarble => {
+                self.settings.mode = PlayMode::Marbles;
+                self.spawn_marble_random();
+            }
+            AppAction::ClearMarbles => self.marble_world.clear(),
+            AppAction::ScatterMarbles => self.marble_world.scatter(2500.0),
             AppAction::SetToySize(size) => self.apply_toy_size(size),
         }
     }
@@ -288,6 +376,40 @@ impl Core {
                     }
                 });
                 ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.label("mode");
+                    if ui
+                        .selectable_label(self.settings.mode == PlayMode::Fidget, "Fidget")
+                        .clicked()
+                    {
+                        self.settings.mode = PlayMode::Fidget;
+                    }
+                    if ui
+                        .selectable_label(self.settings.mode == PlayMode::Marbles, "Marbles")
+                        .clicked()
+                    {
+                        self.settings.mode = PlayMode::Marbles;
+                        self.ensure_marble_mode_seeded();
+                        self.desktop_snapshot_requested = true;
+                    }
+                });
+
+                if self.settings.mode == PlayMode::Marbles {
+                    ui.horizontal(|ui| {
+                        if ui.button("Spawn marble").clicked() {
+                            self.spawn_marble_random();
+                        }
+                        if ui.button("Scatter").clicked() {
+                            self.marble_world.scatter(2500.0);
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.marble_world.clear();
+                        }
+                    });
+                    ui.label(format!("marbles: {}", self.marble_world.marbles.len()));
+                    return;
+                }
 
                 let old_gravity = self.world.gravity_strength();
                 let mut gravity = old_gravity;
@@ -401,6 +523,8 @@ impl Core {
     fn apply_monitor_bounds(&mut self, reset_ball: bool) {
         let bounds = self.active_sim_bounds();
         self.world.set_bounds(bounds);
+        self.marble_world
+            .set_visible_bounds(bounds, self.marble_visible_bounds(bounds));
         if self.settings.sim.single_monitor_bounds {
             self.world
                 .set_bottom_edges([BottomEdge::from_bounds(bounds)]);
@@ -424,6 +548,24 @@ impl Core {
                 .unwrap_or(self.virtual_bounds)
         } else {
             self.virtual_bounds
+        }
+    }
+
+    fn marble_visible_bounds(&self, bounds: Bounds) -> Vec<Bounds> {
+        if self.settings.sim.single_monitor_bounds {
+            return vec![bounds];
+        }
+
+        let monitors: Vec<_> = self
+            .monitor_bounds
+            .iter()
+            .copied()
+            .filter(|bounds| bounds.width() > 1.0 && bounds.height() > 1.0)
+            .collect();
+        if monitors.is_empty() {
+            vec![bounds]
+        } else {
+            monitors
         }
     }
 
@@ -455,11 +597,43 @@ impl Core {
             return;
         }
         self.settings.sim.toy_size = size;
+        self.marble_world
+            .set_radius_range(ToySize::Small.ball_radius(), ToySize::Large.ball_radius());
         self.world.set_size(
             size.ball_radius(),
             size.interaction_scale(),
             size.length_scale(),
         );
+    }
+
+    fn toggle_mode(&mut self) {
+        self.settings.mode = match self.settings.mode {
+            PlayMode::Fidget => PlayMode::Marbles,
+            PlayMode::Marbles => PlayMode::Fidget,
+        };
+        self.spring_interaction_active = false;
+        self.marble_kick_active = false;
+        self.world.stop_spring_interaction();
+        if self.settings.mode == PlayMode::Marbles {
+            self.ensure_marble_mode_seeded();
+            self.desktop_snapshot_requested = true;
+        }
+    }
+
+    fn ensure_marble_mode_seeded(&mut self) {
+        if self.marble_world.marbles.is_empty() {
+            self.spawn_marble_random();
+        }
+    }
+
+    fn spawn_marble_random(&mut self) {
+        let bounds = self.random_spawn_bounds();
+        self.marble_world.set_visible_bounds(bounds, [bounds]);
+        self.marble_world.spawn_random();
+        let active_bounds = self.active_sim_bounds();
+        self.marble_world
+            .set_visible_bounds(active_bounds, self.marble_visible_bounds(active_bounds));
+        self.desktop_snapshot_requested = true;
     }
 
     fn spawn_ball_random(&mut self) {
@@ -531,6 +705,9 @@ impl Core {
     }
 
     fn update_intro_hint(&mut self) {
+        if self.settings.mode != PlayMode::Fidget {
+            return;
+        }
         if self.intro_hint.done {
             return;
         }
@@ -548,12 +725,18 @@ impl Core {
     }
 
     fn start_intro_hint_fade(&mut self, now: f32) {
+        if self.settings.mode != PlayMode::Fidget {
+            return;
+        }
         if !self.intro_hint.done && self.intro_hint.fade_started_at.is_none() {
             self.intro_hint.fade_started_at = Some(now);
         }
     }
 
     fn intro_hint_visual(&self) -> Option<IntroHintVisual> {
+        if self.settings.mode != PlayMode::Fidget {
+            return None;
+        }
         if self.intro_hint.done {
             return None;
         }
@@ -575,6 +758,9 @@ impl Core {
     }
 
     fn show_intro_hints(&self, ctx: &egui::Context) {
+        if self.settings.mode != PlayMode::Fidget {
+            return;
+        }
         let Some(visual) = self.intro_hint_visual() else {
             return;
         };
@@ -649,15 +835,18 @@ impl Core {
 
     #[cfg(target_os = "windows")]
     pub(super) fn hit_test_interactive(&self, cursor: Vec2) -> bool {
-        if self.world.is_grabbed() {
-            return true;
-        }
         // The Win32 shell asks this during `WM_NCHITTEST`; returning false lets
         // normal desktop windows receive clicks through transparent overlay space.
         if self
             .hud_rect
             .is_some_and(|rect| rect.contains(egui::pos2(cursor.x, cursor.y)))
         {
+            return true;
+        }
+        if self.settings.mode == PlayMode::Marbles {
+            return self.marble_world.is_grabbed() || self.marble_world.hit_test(cursor);
+        }
+        if self.world.is_grabbed() {
             return true;
         }
         let ball = &self.world.ball;
@@ -671,11 +860,17 @@ impl Core {
     }
 
     pub(super) fn build_instances(&mut self) {
+        self.instances.clear();
+        self.marble_instances.clear();
+        self.rubber_band.clear();
+        if self.settings.mode == PlayMode::Marbles {
+            self.build_marble_instances();
+            return;
+        }
+
         let world = &self.world;
         let cfg = &world.config;
         let rubber_visual = self.settings.visuals.spring_visual.is_rubber_band();
-        self.instances.clear();
-        self.rubber_band.clear();
 
         if !world.ball_visible() {
             return;
@@ -748,6 +943,7 @@ impl Core {
                     ParticleKind::Spark => Vec4::new(1.0, 0.85, 0.5, 1.0),
                     ParticleKind::Burst => glow_outer,
                     ParticleKind::Mote => glow_inner,
+                    ParticleKind::Shard => Vec4::new(0.82, 0.96, 1.0, 1.0),
                 };
                 self.instances.push(Instance {
                     center: p.pos.to_array(),
@@ -789,6 +985,95 @@ impl Core {
             material: 1.0,
             roll,
         });
+    }
+
+    fn build_marble_instances(&mut self) {
+        for marble in &self.marble_world.marbles {
+            let health = (marble.health / marble.max_health).clamp(0.0, 1.0);
+            let crack = marble.crack.clamp(0.0, 1.0);
+            let shine_alpha = (0.095 + (marble.radius / ToySize::Large.ball_radius()) * 0.030)
+                * (0.82 + health * 0.18)
+                * (1.0 - crack * 0.22);
+            self.instances.push(Instance {
+                center: [
+                    marble.pos.x,
+                    marble.pos.y + marble.radius * (0.36 + crack * 0.10),
+                ],
+                half: [marble.radius * 1.22, marble.radius * 0.32],
+                color: [1.0, 0.98, 0.90, shine_alpha],
+                softness: 0.94,
+                material: 0.0,
+                roll: [1.0, 0.0, 0.0, 0.0],
+            });
+            let caustic_alpha = (0.105 + (marble.radius / ToySize::Large.ball_radius()) * 0.045)
+                * (0.82 + health * 0.18)
+                * (1.0 - crack * 0.18);
+            let caustic_seed = (marble.pattern.seed % 10_000) as f32 * 0.01;
+            self.instances.push(Instance {
+                center: [
+                    marble.pos.x + marble.radius * 0.05,
+                    marble.pos.y + marble.radius * (0.50 + crack * 0.08),
+                ],
+                half: [marble.radius * 1.88, marble.radius * 0.58],
+                color: [1.0, 1.0, 1.0, caustic_alpha],
+                softness: 0.9,
+                material: 3.0,
+                roll: [0.94, 0.34, caustic_seed, marble.roll_angle],
+            });
+        }
+
+        if self.settings.visuals.particles {
+            for p in self.marble_world.particles.iter() {
+                let lf = p.life_frac();
+                let base = match p.kind {
+                    ParticleKind::Spark => Vec4::new(1.0, 0.85, 0.5, 1.0),
+                    ParticleKind::Burst => p.color,
+                    ParticleKind::Mote => p.color,
+                    ParticleKind::Shard => p.color.lerp(Vec4::ONE, 0.24),
+                };
+                self.instances.push(Instance {
+                    center: p.pos.to_array(),
+                    half: [p.size, p.size],
+                    color: [base.x, base.y, base.z, lf * base.w * 0.92],
+                    softness: if p.kind == ParticleKind::Shard {
+                        0.34
+                    } else {
+                        0.82
+                    },
+                    material: if p.kind == ParticleKind::Shard {
+                        2.0
+                    } else {
+                        0.0
+                    },
+                    roll: [1.0, 0.0, self.now() + p.pos.x * 0.01, p.pos.y * 0.01],
+                });
+            }
+        }
+
+        for marble in &self.marble_world.marbles {
+            let speed = marble.speed();
+            let roll_dir = if speed > 1.0 {
+                marble.vel / speed
+            } else {
+                marble.roll_dir
+            };
+            let pattern = marble.pattern;
+            let crack = marble.crack.clamp(0.0, 1.0);
+
+            self.marble_instances.push(MarbleInstance {
+                center: marble.pos.to_array(),
+                radius: marble.radius,
+                health: (marble.health / marble.max_health).clamp(0.0, 1.0),
+                crack,
+                seed: pattern.seed,
+                roll: [roll_dir.x, roll_dir.y, marble.roll_angle, 0.0],
+                primary: pattern.primary.to_array(),
+                secondary: pattern.secondary.to_array(),
+                accent: pattern.accent.to_array(),
+                ribbons: pattern.ribbons.to_array(),
+                glass: pattern.glass.to_array(),
+            });
+        }
     }
 }
 

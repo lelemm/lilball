@@ -3,7 +3,7 @@
 use std::mem::size_of;
 use std::num::NonZeroIsize;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use egui::{Event, Modifiers, PointerButton, RawInput};
 use fidget_sim::Bounds;
 use glam::Vec2;
@@ -11,42 +11,43 @@ use image::imageops::FilterType;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
 };
+use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
-    DeleteObject, EnumDisplayMonitors, GetMonitorInfoW, HDC, HGDIOBJ, HMONITOR, MONITORINFO,
-    ScreenToClient,
+    BitBlt, CreateBitmap, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject,
+    EnumDisplayMonitors, GetDC, GetMonitorInfoW, ReleaseDC, ScreenToClient, SelectObject,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, HGDIOBJ, HMONITOR, MONITORINFO,
+    SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetKeyState, MOD_ALT, MOD_CONTROL, RegisterHotKey, ReleaseCapture,
-    SetCapture, UnregisterHotKey, VK_MENU, VK_RBUTTON, VK_SHIFT,
+    GetAsyncKeyState, GetKeyState, RegisterHotKey, ReleaseCapture, SetCapture, UnregisterHotKey,
+    MOD_ALT, MOD_CONTROL, VK_MENU, VK_RBUTTON, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NOTIFYICON_VERSION,
-    NOTIFYICONDATAW, Shell_NotifyIconW,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION,
+    NOTIFYICONDATAW, NOTIFYICON_VERSION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyMenu, DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWLP_USERDATA, GetCursorPos,
-    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HCURSOR, HICON, HMENU, HTCLIENT,
-    HTTRANSPARENT, HWND_TOPMOST, ICONINFO, IDC_ARROW, IDI_APPLICATION, KillTimer, LWA_ALPHA,
-    LoadCursorW, LoadIconW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
-    PostQuitMessage, RegisterClassW, SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYSMICON,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
+    LoadCursorW, LoadIconW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS, TranslateMessage,
-    WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-    WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, HCURSOR, HICON, HMENU,
+    HTCLIENT, HTTRANSPARENT, HWND_TOPMOST, ICONINFO, IDC_ARROW, IDI_APPLICATION, LWA_ALPHA,
+    MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, SM_CXSMICON, SM_CXVIRTUALSCREEN,
+    SM_CYSMICON, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TRACK_POPUP_MENU_FLAGS, WM_APP, WM_CHAR,
+    WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
-use windows::core::{BOOL, PCWSTR};
 
 use crate::app::core::{AppAction, Core};
-use crate::config::{Settings, ToySize};
-use crate::renderer::{EguiDrawData, Renderer};
+use crate::config::{PlayMode, Settings, ToySize};
+use crate::renderer::{DesktopSnapshot, EguiDrawData, Renderer};
 
 const CLASS_NAME: &str = "FidgetVkOverlayWindow";
 const WINDOW_TITLE: &str = "Fidget-VK";
@@ -58,6 +59,7 @@ const VK_C: u32 = b'C' as u32;
 const VK_G: u32 = b'G' as u32;
 const VK_H: u32 = b'H' as u32;
 const VK_N: u32 = b'N' as u32;
+const VK_P: u32 = b'P' as u32;
 const VK_R: u32 = b'R' as u32;
 const VK_SPACE: u32 = 0x20;
 const VK_ESCAPE: u32 = 0x1B;
@@ -68,6 +70,7 @@ const HOTKEY_TOGGLE_GRAVITY: i32 = 103;
 const HOTKEY_TOGGLE_HUD: i32 = 104;
 const HOTKEY_NUDGE: i32 = 105;
 const HOTKEY_QUIT: i32 = 106;
+const HOTKEY_TOGGLE_MODE: i32 = 107;
 
 const MENU_TOGGLE_HUD: usize = 201;
 const MENU_RESET: usize = 202;
@@ -81,6 +84,10 @@ const MENU_TOGGLE_SINGLE_MONITOR: usize = 209;
 const MENU_SIZE_SMALL: usize = 210;
 const MENU_SIZE_MEDIUM: usize = 211;
 const MENU_SIZE_LARGE: usize = 212;
+const MENU_TOGGLE_MODE: usize = 213;
+const MENU_SPAWN_MARBLE: usize = 214;
+const MENU_CLEAR_MARBLES: usize = 215;
+const MENU_SCATTER_MARBLES: usize = 216;
 const SOCCER_ICON_PNG: &[u8] = include_bytes!("../../../../assets/soccer_ball_material.png");
 const MONITORINFOF_PRIMARY: u32 = 1;
 
@@ -178,10 +185,12 @@ struct Win32App {
     left_down: bool,
     right_down: bool,
     click_through: bool,
+    snapshotter: DesktopSnapshotter,
 }
 
 impl Win32App {
     fn new(hwnd: HWND, instance: HINSTANCE, geometry: OverlayGeometry) -> Self {
+        let snapshot_geometry = geometry.clone();
         let egui_input = RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -202,6 +211,7 @@ impl Win32App {
             left_down: false,
             right_down: false,
             click_through: true,
+            snapshotter: DesktopSnapshotter::new(snapshot_geometry),
         }
     }
 
@@ -252,6 +262,7 @@ impl Win32App {
         let clipped_primitives = ctx.tessellate(full_output.shapes, pixels_per_point);
         self.core.build_instances();
         self.update_click_through_for_cursor();
+        let desktop_snapshot = self.refresh_desktop_snapshot();
 
         let Some(renderer) = self.renderer.as_mut() else {
             return;
@@ -264,6 +275,8 @@ impl Win32App {
         match renderer.render(
             self.core.instances(),
             self.core.rubber_band(),
+            self.core.marble_instances(),
+            desktop_snapshot.as_ref(),
             Some(egui_draw),
         ) {
             Ok(true) => {}
@@ -285,6 +298,7 @@ impl Win32App {
     fn resize(&mut self, width: i32, height: i32) {
         self.geometry.width = width.max(1);
         self.geometry.height = height.max(1);
+        self.snapshotter.set_geometry(self.geometry.clone());
         self.core
             .resize(self.geometry.width as u32, self.geometry.height as u32);
         self.core.set_monitor_layout(
@@ -297,6 +311,20 @@ impl Win32App {
                 renderer.resize((self.geometry.width as u32, self.geometry.height as u32))
             {
                 log::error!("Win32 resize failed: {e}");
+            }
+        }
+    }
+
+    fn refresh_desktop_snapshot(&mut self) -> Option<DesktopSnapshot> {
+        if self.core.play_mode() != PlayMode::Marbles || !self.core.take_desktop_snapshot_request()
+        {
+            return None;
+        }
+        match self.snapshotter.capture() {
+            Ok(snapshot) => Some(snapshot),
+            Err(e) => {
+                log::debug!("desktop snapshot capture failed: {e}");
+                None
             }
         }
     }
@@ -440,7 +468,11 @@ impl Win32App {
         self.cursor = pos;
         if !self.right_down {
             self.right_down = true;
+            self.core.on_cursor_moved(pos);
             self.core.on_right_pressed();
+            unsafe {
+                let _ = SetCapture(self.hwnd);
+            }
         }
         self.egui_input.events.push(Event::PointerButton {
             pos: egui::pos2(pos.x, pos.y),
@@ -455,8 +487,12 @@ impl Win32App {
         let pos = client_pos_from_lparam(lparam);
         self.cursor = pos;
         if self.right_down {
+            self.core.on_cursor_moved(pos);
             self.right_down = false;
             self.core.on_right_released();
+            if !self.left_down {
+                let _ = unsafe { ReleaseCapture() };
+            }
         }
         self.egui_input.events.push(Event::PointerButton {
             pos: egui::pos2(pos.x, pos.y),
@@ -489,6 +525,7 @@ impl Win32App {
             VK_G => self.core.apply_action(AppAction::ToggleGravity),
             VK_H => self.core.apply_action(AppAction::ToggleHud),
             VK_N => self.core.apply_action(AppAction::Nudge),
+            VK_P => self.core.apply_action(AppAction::ToggleMode),
             _ => {}
         }
     }
@@ -573,7 +610,29 @@ impl Win32App {
         };
         unsafe {
             append_checked_menu(menu, MENU_TOGGLE_HUD, "Show HUD", self.core.hud_visible());
-            append_menu(menu, MENU_RESET, "Spawn ball");
+            append_checked_menu(
+                menu,
+                MENU_TOGGLE_MODE,
+                "Marble mode",
+                self.core.play_mode() == PlayMode::Marbles,
+            );
+            append_menu(
+                menu,
+                MENU_RESET,
+                if self.core.play_mode() == PlayMode::Marbles {
+                    "Spawn marble"
+                } else {
+                    "Spawn ball"
+                },
+            );
+            append_menu(menu, MENU_SPAWN_MARBLE, "Spawn marble");
+            append_menu(menu, MENU_SCATTER_MARBLES, "Scatter marbles");
+            append_menu(
+                menu,
+                MENU_CLEAR_MARBLES,
+                &format!("Clear marbles ({})", self.core.marble_count()),
+            );
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             append_checked_menu(
                 menu,
                 MENU_TOGGLE_SPRING,
@@ -642,7 +701,11 @@ impl Win32App {
     fn handle_command(&mut self, id: usize) {
         match id {
             MENU_TOGGLE_HUD => self.core.apply_action(AppAction::ToggleHud),
+            MENU_TOGGLE_MODE => self.core.apply_action(AppAction::ToggleMode),
             MENU_RESET => self.core.apply_action(AppAction::Reset),
+            MENU_SPAWN_MARBLE => self.core.apply_action(AppAction::SpawnMarble),
+            MENU_CLEAR_MARBLES => self.core.apply_action(AppAction::ClearMarbles),
+            MENU_SCATTER_MARBLES => self.core.apply_action(AppAction::ScatterMarbles),
             MENU_TOGGLE_SPRING => self.core.apply_action(AppAction::ToggleSpring),
             MENU_TOGGLE_RUBBER_BAND => self.core.apply_action(AppAction::ToggleSpringVisual),
             MENU_TOGGLE_GRAVITY => self.core.apply_action(AppAction::ToggleGravity),
@@ -673,6 +736,7 @@ impl Win32App {
             (HOTKEY_TOGGLE_GRAVITY, VK_G),
             (HOTKEY_TOGGLE_HUD, VK_H),
             (HOTKEY_NUDGE, VK_N),
+            (HOTKEY_TOGGLE_MODE, VK_P),
             (HOTKEY_QUIT, VK_ESCAPE),
         ];
         for (id, vk) in hotkeys {
@@ -689,6 +753,7 @@ impl Win32App {
             HOTKEY_TOGGLE_GRAVITY,
             HOTKEY_TOGGLE_HUD,
             HOTKEY_NUDGE,
+            HOTKEY_TOGGLE_MODE,
             HOTKEY_QUIT,
         ] {
             let _ = unsafe { UnregisterHotKey(Some(self.hwnd), id) };
@@ -702,6 +767,7 @@ impl Win32App {
             HOTKEY_TOGGLE_GRAVITY => self.core.apply_action(AppAction::ToggleGravity),
             HOTKEY_TOGGLE_HUD => self.core.apply_action(AppAction::ToggleHud),
             HOTKEY_NUDGE => self.core.apply_action(AppAction::Nudge),
+            HOTKEY_TOGGLE_MODE => self.core.apply_action(AppAction::ToggleMode),
             HOTKEY_QUIT => self.quit(),
             _ => {}
         }
@@ -760,6 +826,113 @@ impl OverlayGeometry {
                 primary_monitor,
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DesktopSnapshotter {
+    geometry: OverlayGeometry,
+}
+
+impl DesktopSnapshotter {
+    fn new(geometry: OverlayGeometry) -> Self {
+        Self { geometry }
+    }
+
+    fn set_geometry(&mut self, geometry: OverlayGeometry) {
+        self.geometry = geometry;
+    }
+
+    fn capture(&mut self) -> Result<DesktopSnapshot> {
+        let width = self.geometry.width.max(1) as u32;
+        let height = self.geometry.height.max(1) as u32;
+        let width_i32 = width as i32;
+        let height_i32 = height as i32;
+
+        let bitmap_info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width_i32,
+                biHeight: -height_i32,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let screen_dc = unsafe { GetDC(None) };
+        if screen_dc.is_invalid() {
+            return Err(anyhow!("failed to get screen DC"));
+        }
+        let mem_dc = unsafe { CreateCompatibleDC(Some(screen_dc)) };
+        if mem_dc.is_invalid() {
+            unsafe {
+                let _ = ReleaseDC(None, screen_dc);
+            }
+            return Err(anyhow!("failed to create compatible DC"));
+        }
+
+        let mut bits = std::ptr::null_mut();
+        let bitmap = unsafe {
+            CreateDIBSection(
+                Some(mem_dc),
+                &bitmap_info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                None,
+                0,
+            )
+            .context("failed to create desktop capture DIB")?
+        };
+
+        let result = (|| {
+            let old = unsafe { SelectObject(mem_dc, HGDIOBJ::from(bitmap)) };
+            if old.is_invalid() {
+                return Err(anyhow!("failed to select capture bitmap"));
+            }
+            unsafe {
+                BitBlt(
+                    mem_dc,
+                    0,
+                    0,
+                    width_i32,
+                    height_i32,
+                    Some(screen_dc),
+                    self.geometry.x,
+                    self.geometry.y,
+                    SRCCOPY,
+                )
+            }
+            .context("desktop BitBlt failed")?;
+            unsafe {
+                let _ = SelectObject(mem_dc, old);
+            }
+
+            let bgra = unsafe {
+                std::slice::from_raw_parts(bits as *const u8, width as usize * height as usize * 4)
+            };
+            let mut rgba = vec![0_u8; bgra.len()];
+            for (src, dst) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+                dst[0] = src[2];
+                dst[1] = src[1];
+                dst[2] = src[0];
+                dst[3] = 255;
+            }
+            Ok(DesktopSnapshot {
+                width,
+                height,
+                rgba,
+            })
+        })();
+
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ::from(bitmap));
+            let _ = DeleteDC(mem_dc);
+            let _ = ReleaseDC(None, screen_dc);
+        }
+        result
     }
 }
 
@@ -1104,6 +1277,7 @@ fn egui_key_from_vk(vk: u32) -> Option<egui::Key> {
         VK_G => egui::Key::G,
         VK_H => egui::Key::H,
         VK_N => egui::Key::N,
+        VK_P => egui::Key::P,
         0x25 => egui::Key::ArrowLeft,
         0x26 => egui::Key::ArrowUp,
         0x27 => egui::Key::ArrowRight,

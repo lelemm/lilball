@@ -1,6 +1,7 @@
 use approx::assert_relative_eq;
 use fidget_sim::{
-    Ball, BottomEdge, Bounds, FIXED_DT, InteractionState, ParticleSystem, Trail, World, WorldConfig,
+    Ball, BottomEdge, Bounds, InteractionState, MarbleConfig, MarbleWorld, ParticleSystem, Trail,
+    World, WorldConfig, FIXED_DT,
 };
 use glam::{Vec2, Vec4};
 
@@ -12,11 +13,254 @@ fn no_gravity_world() -> World {
     World::new(cfg, Bounds::new(0.0, 0.0, 1000.0, 600.0))
 }
 
+fn marble_world() -> MarbleWorld {
+    let cfg = MarbleConfig {
+        min_radius: 24.0,
+        max_radius: 42.0,
+        ..MarbleConfig::default()
+    };
+    MarbleWorld::new(cfg, Bounds::new(0.0, 0.0, 1000.0, 600.0))
+}
+
 #[test]
 fn ball_starts_centered() {
     let world = no_gravity_world();
     assert_relative_eq!(world.ball.pos.x, 500.0);
     assert_relative_eq!(world.ball.pos.y, 300.0);
+}
+
+#[test]
+fn marble_spawn_stays_inside_bounds() {
+    let mut world = marble_world();
+    for _ in 0..80 {
+        world.spawn_random();
+    }
+
+    assert_eq!(world.marbles.len(), 80);
+    for marble in &world.marbles {
+        assert!(marble.pos.x >= world.bounds.left + marble.radius);
+        assert!(marble.pos.x <= world.bounds.right - marble.radius);
+        assert!(marble.pos.y >= world.bounds.top + marble.radius);
+        assert!(marble.pos.y <= world.bounds.bottom - marble.radius);
+        assert!(marble.radius >= 24.0 && marble.radius <= 42.0);
+    }
+}
+
+#[test]
+fn marble_spawn_uses_visible_monitor_regions_not_virtual_gaps() {
+    let mut world = marble_world();
+    let bounds = Bounds::new(0.0, 0.0, 2000.0, 900.0);
+    let monitors = [
+        Bounds::new(0.0, 0.0, 800.0, 900.0),
+        Bounds::new(1000.0, 0.0, 2000.0, 900.0),
+    ];
+    world.set_visible_bounds(bounds, monitors);
+
+    for _ in 0..120 {
+        world.spawn_random();
+    }
+
+    assert!(world.marbles.iter().all(|marble| {
+        marble.pos.x <= 800.0 - marble.radius || marble.pos.x >= 1000.0 + marble.radius
+    }));
+}
+
+#[test]
+fn marble_bounces_from_exposed_monitor_gap_edge() {
+    let mut world = marble_world();
+    let bounds = Bounds::new(0.0, 0.0, 2000.0, 900.0);
+    let monitors = [
+        Bounds::new(0.0, 0.0, 800.0, 900.0),
+        Bounds::new(1000.0, 0.0, 2000.0, 900.0),
+    ];
+    world.set_visible_bounds(bounds, monitors);
+    world.spawn_at(Vec2::new(760.0, 450.0), 30.0);
+    world.marbles[0].vel = Vec2::new(900.0, 0.0);
+
+    for _ in 0..16 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        world.marbles[0].pos.x <= 800.0 - world.marbles[0].radius + 0.6,
+        "marble should stay on visible monitor edge, pos={:?}",
+        world.marbles[0].pos
+    );
+    assert!(
+        world.marbles[0].vel.x < 0.0,
+        "marble should bounce away from invisible gap, vel={:?}",
+        world.marbles[0].vel
+    );
+}
+
+#[test]
+fn marble_crosses_touching_monitor_seam() {
+    let mut world = marble_world();
+    let bounds = Bounds::new(0.0, 0.0, 1000.0, 1200.0);
+    let monitors = [
+        Bounds::new(0.0, 0.0, 1000.0, 700.0),
+        Bounds::new(0.0, 700.0, 1000.0, 1200.0),
+    ];
+    world.set_visible_bounds(bounds, monitors);
+    world.spawn_at(Vec2::new(500.0, 650.0), 30.0);
+    world.marbles[0].vel = Vec2::new(0.0, 900.0);
+
+    for _ in 0..14 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        world.marbles[0].pos.y > 700.0 + world.marbles[0].radius,
+        "touching monitor seam should not act as a wall, pos={:?}",
+        world.marbles[0].pos
+    );
+    assert!(
+        world.marbles[0].vel.y > 0.0,
+        "marble should keep moving through touching monitor seam, vel={:?}",
+        world.marbles[0].vel
+    );
+}
+
+#[test]
+fn marbles_move_without_gravity() {
+    let mut world = marble_world();
+    world.spawn_at(Vec2::new(200.0, 220.0), 30.0);
+    world.marbles[0].vel = Vec2::new(240.0, 0.0);
+    let y0 = world.marbles[0].pos.y;
+
+    for _ in 0..60 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(world.marbles[0].pos.x > 200.0);
+    assert_relative_eq!(world.marbles[0].pos.y, y0, epsilon = 0.01);
+}
+
+#[test]
+fn marble_bounces_off_wall_and_takes_damage_when_fast() {
+    let mut world = marble_world();
+    world.config.damage_threshold = 200.0;
+    world.config.damage_scale = 0.08;
+    world.spawn_at(Vec2::new(950.0, 300.0), 30.0);
+    world.marbles[0].vel = Vec2::new(1600.0, 0.0);
+
+    for _ in 0..20 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(world.marbles[0].vel.x < 0.0);
+    assert!(
+        world.marbles[0].speed() < 1100.0,
+        "wall bounce should shed energy quickly, vel={:?}",
+        world.marbles[0].vel
+    );
+    assert!(world.marbles[0].health < 100.0);
+    assert!(world.marbles[0].crack > 0.0);
+}
+
+#[test]
+fn marbles_collide_and_exchange_momentum() {
+    let mut world = marble_world();
+    world.spawn_at(Vec2::new(430.0, 300.0), 36.0);
+    world.spawn_at(Vec2::new(500.0, 300.0), 36.0);
+    world.marbles[0].vel = Vec2::new(900.0, 0.0);
+    world.marbles[1].vel = Vec2::ZERO;
+
+    for _ in 0..24 {
+        world.advance(FIXED_DT);
+    }
+
+    assert!(
+        world.marbles[0].vel.x < 450.0,
+        "first marble should give up momentum, vel={:?}",
+        world.marbles[0].vel
+    );
+    assert!(
+        world.marbles[1].vel.x > 350.0,
+        "second marble should receive momentum, vel={:?}",
+        world.marbles[1].vel
+    );
+}
+
+#[test]
+fn cursor_drag_release_flicks_marble() {
+    let mut world = marble_world();
+    world.spawn_at(Vec2::new(260.0, 260.0), 32.0);
+    let mut now = 0.0;
+    assert!(world.grab(Vec2::new(260.0, 260.0), now));
+    for i in 1..=8 {
+        now = i as f32 * 0.01;
+        world.move_cursor(Vec2::new(260.0 + 55.0 * i as f32, 260.0), now);
+        world.advance(0.01);
+    }
+    world.release(now);
+
+    assert!(world.marbles[0].vel.x > 1000.0);
+    assert!(!world.is_grabbed());
+}
+
+#[test]
+fn passive_cursor_sweep_does_not_kick_marble() {
+    let mut world = marble_world();
+    world.spawn_at(Vec2::new(500.0, 300.0), 34.0);
+    world.marbles[0].vel = Vec2::ZERO;
+
+    world.move_cursor(Vec2::new(300.0, 300.0), 0.0);
+    world.move_cursor(Vec2::new(700.0, 300.0), 0.03);
+
+    assert_relative_eq!(world.marbles[0].speed(), 0.0, epsilon = 0.01);
+    assert_relative_eq!(world.marbles[0].health, 100.0, epsilon = 0.01);
+}
+
+#[test]
+fn right_click_cursor_sweep_transfers_momentum_and_damage() {
+    let mut world = marble_world();
+    world.config.damage_threshold = 300.0;
+    world.config.damage_scale = 0.05;
+    world.spawn_at(Vec2::new(500.0, 300.0), 34.0);
+    world.marbles[0].vel = Vec2::ZERO;
+
+    world.begin_kick(Vec2::new(300.0, 300.0), 0.0);
+    world.kick_cursor(Vec2::new(700.0, 300.0), 0.03);
+
+    assert!(
+        world.marbles[0].speed() > 1000.0,
+        "right-click sweep should launch marble, vel={:?}",
+        world.marbles[0].vel
+    );
+    assert!(world.marbles[0].health < 100.0);
+}
+
+#[test]
+fn marble_shatters_and_is_removed_at_zero_health() {
+    let mut world = marble_world();
+    world.spawn_at(Vec2::new(500.0, 300.0), 34.0);
+    world.marbles[0].health = -1.0;
+
+    world.advance(FIXED_DT);
+
+    assert!(world.marbles.is_empty());
+    assert!(!world.particles.is_empty());
+}
+
+#[test]
+fn many_marbles_broadphase_remains_stable() {
+    let mut world = marble_world();
+    world.config.min_radius = 12.0;
+    world.config.max_radius = 18.0;
+    for _ in 0..180 {
+        world.spawn_random();
+    }
+
+    for _ in 0..90 {
+        world.advance(FIXED_DT);
+    }
+
+    assert_eq!(world.marbles.len(), 180);
+    assert!(world
+        .marbles
+        .iter()
+        .all(|m| m.pos.x.is_finite() && m.pos.y.is_finite() && m.vel.is_finite()));
 }
 
 #[test]

@@ -10,6 +10,7 @@ pub mod ball;
 pub mod bounds;
 pub mod collisions;
 pub mod interaction;
+pub mod marbles;
 pub mod particles;
 pub mod spring;
 pub mod trail;
@@ -18,8 +19,9 @@ pub mod world;
 pub use ball::Ball;
 pub use bounds::{BottomEdge, Bounds};
 pub use interaction::{InteractionState, PointerSample};
+pub use marbles::{Marble, MarbleConfig, MarblePattern, MarbleWorld};
 pub use particles::{Particle, ParticleKind, ParticleSystem};
-pub use spring::{CursorEntanglement, CursorIntersection, DEFAULT_RECALL_MARGIN, SpringState};
+pub use spring::{CursorEntanglement, CursorIntersection, SpringState, DEFAULT_RECALL_MARGIN};
 pub use trail::{Trail, TrailPoint};
 pub use world::{World, WorldConfig};
 

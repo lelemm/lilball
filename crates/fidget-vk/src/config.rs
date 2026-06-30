@@ -6,8 +6,16 @@
 
 use serde::{Deserialize, Serialize};
 
-use fidget_sim::WorldConfig;
+use fidget_sim::{MarbleConfig, WorldConfig};
 use glam::{Vec2, Vec4};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayMode {
+    #[default]
+    Fidget,
+    Marbles,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -148,6 +156,7 @@ impl Default for SimSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub mode: PlayMode,
     pub ball: BallSettings,
     pub visuals: VisualSettings,
     pub sim: SimSettings,
@@ -200,5 +209,34 @@ impl Settings {
             color_outer: Vec4::from_array(self.ball.color_outer),
             ..WorldConfig::default()
         }
+    }
+
+    pub fn marble_config(&self) -> MarbleConfig {
+        MarbleConfig {
+            min_radius: ToySize::Small.ball_radius(),
+            max_radius: ToySize::Large.ball_radius(),
+            max_speed: self.sim.max_speed,
+            max_particles: self.visuals.max_particles,
+            ..MarbleConfig::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_settings_default_to_fidget_mode() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "ball": { "radius": 48.0 },
+                "visuals": { "particles": true },
+                "sim": { "gravity": 600.0 }
+            }"#,
+        )
+        .expect("settings without mode should deserialize");
+
+        assert_eq!(settings.mode, PlayMode::Fidget);
     }
 }

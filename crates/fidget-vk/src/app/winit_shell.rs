@@ -14,8 +14,8 @@ use winit::platform::x11::{WindowAttributesExtX11, WindowType};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::app::core::{AppAction, Core};
-use crate::config::{Settings, ToySize};
-use crate::renderer::{EguiDrawData, Renderer};
+use crate::config::{PlayMode, Settings, ToySize};
+use crate::renderer::{DesktopSnapshot, EguiDrawData, Renderer};
 
 pub(super) struct WinitApp {
     core: Core,
@@ -26,6 +26,7 @@ pub(super) struct WinitApp {
     egui_state: Option<egui_winit::State>,
     monitor_bounds: Vec<Bounds>,
     primary_monitor: usize,
+    snapshotter: DesktopSnapshotter,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +46,7 @@ impl WinitApp {
             egui_state: None,
             monitor_bounds: Vec::new(),
             primary_monitor: 0,
+            snapshotter: DesktopSnapshotter,
         }
     }
 
@@ -78,6 +80,7 @@ impl WinitApp {
         };
 
         self.core.build_instances();
+        let desktop_snapshot = self.refresh_desktop_snapshot();
 
         let Some(renderer) = self.renderer.as_mut() else {
             return;
@@ -92,7 +95,13 @@ impl WinitApp {
                         pixels_per_point: *pixels_per_point,
                     },
                 );
-        match renderer.render(self.core.instances(), self.core.rubber_band(), egui_draw) {
+        match renderer.render(
+            self.core.instances(),
+            self.core.rubber_band(),
+            self.core.marble_instances(),
+            desktop_snapshot.as_ref(),
+            egui_draw,
+        ) {
             Ok(true) => {}
             Ok(false) => {
                 // Swapchain out of date: recreate at the current window size.
@@ -112,6 +121,29 @@ impl WinitApp {
             Err(e) => {
                 log::error!("render error: {e}");
                 event_loop.exit();
+            }
+        }
+    }
+
+    fn refresh_desktop_snapshot(&mut self) -> Option<DesktopSnapshot> {
+        if self.core.play_mode() != PlayMode::Marbles || !self.core.take_desktop_snapshot_request()
+        {
+            return None;
+        }
+        let window = self.window.as_ref()?;
+        let pos = window
+            .outer_position()
+            .unwrap_or(PhysicalPosition::new(0, 0));
+        let size = window.inner_size();
+        match self
+            .snapshotter
+            .capture(pos.x, pos.y, size.width.max(1), size.height.max(1))
+        {
+            Ok(Some(snapshot)) => Some(snapshot),
+            Ok(None) => None,
+            Err(e) => {
+                log::debug!("desktop snapshot capture failed: {e}");
+                None
             }
         }
     }
@@ -262,6 +294,18 @@ impl ApplicationHandler for WinitApp {
                         PhysicalKey::Code(KeyCode::KeyN) => {
                             self.core.apply_action(AppAction::Nudge);
                         }
+                        PhysicalKey::Code(KeyCode::KeyP) => {
+                            self.core.apply_action(AppAction::ToggleMode);
+                        }
+                        PhysicalKey::Code(KeyCode::KeyO) => {
+                            self.core.apply_action(AppAction::SpawnMarble);
+                        }
+                        PhysicalKey::Code(KeyCode::KeyF) => {
+                            self.core.apply_action(AppAction::ScatterMarbles);
+                        }
+                        PhysicalKey::Code(KeyCode::Delete) => {
+                            self.core.apply_action(AppAction::ClearMarbles);
+                        }
                         PhysicalKey::Code(KeyCode::KeyV) => {
                             self.core.apply_action(AppAction::ToggleSpringVisual);
                         }
@@ -365,4 +409,130 @@ fn overlay_geometry(event_loop: &ActiveEventLoop) -> OverlayGeometry {
         monitor_bounds,
         primary_monitor,
     }
+}
+
+#[derive(Default)]
+struct DesktopSnapshotter;
+
+impl DesktopSnapshotter {
+    fn capture(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<DesktopSnapshot>> {
+        #[cfg(target_os = "linux")]
+        {
+            capture_x11_root(x, y, width, height)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (x, y, width, height);
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn capture_x11_root(x: i32, y: i32, width: u32, height: u32) -> Result<Option<DesktopSnapshot>> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder};
+
+    let (conn, screen_num) = match x11rb::connect(None) {
+        Ok(connection) => connection,
+        Err(e) => {
+            log::debug!("x11 snapshot connect failed: {e}");
+            return Ok(None);
+        }
+    };
+    let setup = conn.setup();
+    let screen = &setup.roots[screen_num];
+    let src_x = x.max(0).min(i16::MAX as i32) as i16;
+    let src_y = y.max(0).min(i16::MAX as i32) as i16;
+    let available_w = screen.width_in_pixels.saturating_sub(src_x.max(0) as u16);
+    let available_h = screen.height_in_pixels.saturating_sub(src_y.max(0) as u16);
+    let width = width.min(available_w as u32).min(u16::MAX as u32);
+    let height = height.min(available_h as u32).min(u16::MAX as u32);
+    if width == 0 || height == 0 {
+        return Ok(None);
+    }
+
+    let reply = match conn
+        .get_image(
+            ImageFormat::Z_PIXMAP,
+            screen.root,
+            src_x,
+            src_y,
+            width as u16,
+            height as u16,
+            u32::MAX,
+        )?
+        .reply()
+    {
+        Ok(reply) => reply,
+        Err(e) => {
+            log::debug!("x11 root get_image failed: {e}");
+            return Ok(None);
+        }
+    };
+
+    let bits_per_pixel = setup
+        .pixmap_formats
+        .iter()
+        .find(|format| format.depth == reply.depth)
+        .map(|format| format.bits_per_pixel)
+        .unwrap_or(32);
+    let bytes_per_pixel = (bits_per_pixel as usize).div_ceil(8).max(1);
+    let stride = reply.data.len() / height as usize;
+    if stride < width as usize * bytes_per_pixel {
+        return Ok(None);
+    }
+    let lsb = setup.image_byte_order == ImageOrder::LSB_FIRST;
+    let root_visual = screen
+        .allowed_depths
+        .iter()
+        .flat_map(|depth| depth.visuals.iter())
+        .find(|visual| visual.visual_id == screen.root_visual);
+    let red_mask = root_visual
+        .map(|visual| visual.red_mask)
+        .unwrap_or(0x00ff_0000);
+    let green_mask = root_visual
+        .map(|visual| visual.green_mask)
+        .unwrap_or(0x0000_ff00);
+    let blue_mask = root_visual
+        .map(|visual| visual.blue_mask)
+        .unwrap_or(0x0000_00ff);
+    let red_shift = red_mask.trailing_zeros();
+    let green_shift = green_mask.trailing_zeros();
+    let blue_shift = blue_mask.trailing_zeros();
+    let red_max = (red_mask >> red_shift).max(1);
+    let green_max = (green_mask >> green_shift).max(1);
+    let blue_max = (blue_mask >> blue_shift).max(1);
+
+    let mut rgba = vec![0_u8; width as usize * height as usize * 4];
+    for py in 0..height as usize {
+        for px in 0..width as usize {
+            let src = py * stride + px * bytes_per_pixel;
+            let mut raw = [0_u8; 4];
+            let count = bytes_per_pixel.min(4);
+            raw[..count].copy_from_slice(&reply.data[src..src + count]);
+            let pixel = if lsb {
+                u32::from_le_bytes(raw)
+            } else {
+                u32::from_be_bytes(raw)
+            };
+            let dst = (py * width as usize + px) * 4;
+            rgba[dst] = (((pixel & red_mask) >> red_shift) * 255 / red_max) as u8;
+            rgba[dst + 1] = (((pixel & green_mask) >> green_shift) * 255 / green_max) as u8;
+            rgba[dst + 2] = (((pixel & blue_mask) >> blue_shift) * 255 / blue_max) as u8;
+            rgba[dst + 3] = 255;
+        }
+    }
+
+    Ok(Some(DesktopSnapshot {
+        width,
+        height,
+        rgba,
+    }))
 }

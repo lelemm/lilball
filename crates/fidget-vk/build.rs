@@ -17,6 +17,8 @@ fn main() {
         "blob.frag",
         "ball_mesh.vert",
         "ball_mesh.frag",
+        "marble_mesh.vert",
+        "marble_mesh.frag",
         "rubber_mesh.vert",
         "rubber_mesh.frag",
     ];

@@ -9,6 +9,8 @@ pub enum ParticleKind {
     Spark,
     /// Burst emitted when the ball is thrown.
     Burst,
+    /// Glass flecks emitted when a marble cracks or shatters.
+    Shard,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -170,6 +172,30 @@ impl ParticleSystem {
                 size,
                 color,
                 kind: ParticleKind::Burst,
+            });
+        }
+    }
+
+    /// Emit sharper glass-like flecks for marble impacts and shatters.
+    pub fn emit_shards(&mut self, pos: Vec2, speed: f32, count: usize, color: Vec4) {
+        let count = count.clamp(4, 96);
+        for i in 0..count {
+            let jitter = self.rand_range(-0.22, 0.22);
+            let sp = self.rand_range(70.0, 160.0 + speed * 0.45);
+            let max_life = self.rand_range(0.18, 0.72);
+            let size = self.rand_range(1.5, 5.8);
+            let ang = (i as f32 / count as f32) * std::f32::consts::TAU + jitter;
+            let dir = Vec2::new(ang.cos(), ang.sin());
+            let pos_jitter = self.rand_range(0.0, 8.0);
+            let vel_jitter = Vec2::new(self.rand_range(-30.0, 30.0), self.rand_range(-30.0, 30.0));
+            self.push(Particle {
+                pos: pos + dir * pos_jitter,
+                vel: dir * sp + vel_jitter,
+                life: max_life,
+                max_life,
+                size,
+                color,
+                kind: ParticleKind::Shard,
             });
         }
     }

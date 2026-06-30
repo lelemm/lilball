@@ -26,6 +26,7 @@ egui-ash-renderer = "0.11.0"
 [target.'cfg(not(windows))'.dependencies]
 winit = "0.30"
 egui-winit = "0.33"
+x11rb = { version = "0.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61.3", features = [

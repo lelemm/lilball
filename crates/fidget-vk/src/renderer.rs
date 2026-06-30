@@ -8,7 +8,7 @@
 
 use std::ffi::CStr;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use ash::vk;
 use egui::{ClippedPrimitive, TextureId, TexturesDelta};
 use egui_ash_renderer::{Options as EguiRendererOptions, Renderer as EguiRenderer};
@@ -45,6 +45,8 @@ const VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blob.vert.spv"
 const FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blob.frag.spv"));
 const MESH_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ball_mesh.vert.spv"));
 const MESH_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ball_mesh.frag.spv"));
+const MARBLE_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/marble_mesh.vert.spv"));
+const MARBLE_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/marble_mesh.frag.spv"));
 const RUBBER_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rubber_mesh.vert.spv"));
 const RUBBER_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rubber_mesh.frag.spv"));
 const SOCCER_TEXTURE_PNG: &[u8] = include_bytes!("../../../assets/soccer_ball_material.png");
@@ -63,6 +65,8 @@ struct Texture {
     memory: vk::DeviceMemory,
     view: vk::ImageView,
     sampler: vk::Sampler,
+    width: u32,
+    height: u32,
 }
 
 #[repr(C)]
@@ -140,6 +144,34 @@ struct BallMesh {
     texture: Texture,
 }
 
+struct MeshGeometry {
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
+    index_count: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MarbleInstance {
+    pub center: [f32; 2],
+    pub radius: f32,
+    pub health: f32,
+    pub crack: f32,
+    pub seed: u32,
+    pub roll: [f32; 4],
+    pub primary: [f32; 4],
+    pub secondary: [f32; 4],
+    pub accent: [f32; 4],
+    pub ribbons: [f32; 4],
+    pub glass: [f32; 4],
+}
+
+#[derive(Clone, Debug)]
+pub struct DesktopSnapshot {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 /// Swapchain-dependent resources, recreated on resize.
 struct SwapchainBundle {
     swapchain: vk::SwapchainKHR,
@@ -163,10 +195,14 @@ pub struct Renderer {
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
+    desktop_descriptor_pool: vk::DescriptorPool,
+    desktop_descriptor_set: vk::DescriptorSet,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     mesh_pipeline_layout: vk::PipelineLayout,
     mesh_pipeline: vk::Pipeline,
+    marble_pipeline_layout: vk::PipelineLayout,
+    marble_pipeline: vk::Pipeline,
     rubber_pipeline_layout: vk::PipelineLayout,
     rubber_pipeline: vk::Pipeline,
     egui_renderer: Option<EguiRenderer>,
@@ -178,6 +214,8 @@ pub struct Renderer {
     rubber_vertex_buffers: Vec<Buffer>,
     rubber_index_buffers: Vec<Buffer>,
     ball_mesh: BallMesh,
+    marble_mesh: MeshGeometry,
+    desktop_texture: Texture,
 
     image_available: Vec<vk::Semaphore>,
     render_finished: Vec<vk::Semaphore>,
@@ -266,6 +304,8 @@ impl Renderer {
             create_pipeline(&device, render_pass, descriptor_set_layout)?;
         let (mesh_pipeline_layout, mesh_pipeline) =
             create_mesh_pipeline(&device, render_pass, descriptor_set_layout)?;
+        let (marble_pipeline_layout, marble_pipeline) =
+            create_marble_pipeline(&device, render_pass, descriptor_set_layout)?;
         let (rubber_pipeline_layout, rubber_pipeline) =
             create_rubber_pipeline(&device, render_pass)?;
         let egui_renderer = EguiRenderer::with_default_allocator(
@@ -353,6 +393,13 @@ impl Renderer {
             .context("failed to load GLB soccer ball mesh")?;
         let (descriptor_pool, descriptor_set) =
             create_texture_descriptor(&device, descriptor_set_layout, &ball_mesh.texture)?;
+        let marble_mesh = create_marble_mesh(&device, &mem_props)
+            .context("failed to create generated marble sphere mesh")?;
+        let desktop_texture =
+            create_default_desktop_texture(&device, &mem_props, command_pool, queue)
+                .context("failed to create desktop snapshot fallback texture")?;
+        let (desktop_descriptor_pool, desktop_descriptor_set) =
+            create_texture_descriptor(&device, descriptor_set_layout, &desktop_texture)?;
 
         // --- Sync primitives ----------------------------------------------
         let mut image_available = Vec::new();
@@ -387,10 +434,14 @@ impl Renderer {
             descriptor_set_layout,
             descriptor_pool,
             descriptor_set,
+            desktop_descriptor_pool,
+            desktop_descriptor_set,
             pipeline_layout,
             pipeline,
             mesh_pipeline_layout,
             mesh_pipeline,
+            marble_pipeline_layout,
+            marble_pipeline,
             rubber_pipeline_layout,
             rubber_pipeline,
             egui_renderer: Some(egui_renderer),
@@ -401,6 +452,8 @@ impl Renderer {
             rubber_vertex_buffers,
             rubber_index_buffers,
             ball_mesh,
+            marble_mesh,
+            desktop_texture,
             image_available,
             render_finished,
             in_flight,
@@ -447,6 +500,8 @@ impl Renderer {
         &mut self,
         instances: &[Instance],
         rubber_band: &RubberBandMesh,
+        marbles: &[MarbleInstance],
+        desktop_snapshot: Option<&DesktopSnapshot>,
         egui: Option<EguiDrawData<'_>>,
     ) -> Result<bool> {
         let frame = self.current_frame;
@@ -486,6 +541,10 @@ impl Renderer {
                 .set_textures(self.queue, self.command_pool, &egui.textures_delta.set)
                 .map_err(|e| anyhow!("failed to upload egui textures: {e}"))?;
         }
+        if let Some(snapshot) = desktop_snapshot {
+            self.update_desktop_snapshot(snapshot)
+                .context("failed to upload desktop snapshot")?;
+        }
 
         // Upload blob instances for this frame. Material=1 instances become
         // GLB ball mesh draws, including rubber-mode ghost trail balls.
@@ -512,6 +571,7 @@ impl Renderer {
             count as u32,
             rubber_index_count,
             &ball_instances,
+            marbles,
             egui.as_ref(),
         )?;
 
@@ -573,6 +633,64 @@ impl Renderer {
         )
     }
 
+    fn update_desktop_snapshot(&mut self, snapshot: &DesktopSnapshot) -> Result<()> {
+        if snapshot.width == 0 || snapshot.height == 0 {
+            return Ok(());
+        }
+        let expected = snapshot.width as usize * snapshot.height as usize * 4;
+        if snapshot.rgba.len() != expected {
+            return Err(anyhow!(
+                "desktop snapshot has {} bytes, expected {expected}",
+                snapshot.rgba.len()
+            ));
+        }
+
+        unsafe { self.device.device_wait_idle()? };
+        if self.desktop_texture.width != snapshot.width
+            || self.desktop_texture.height != snapshot.height
+        {
+            destroy_texture(&self.device, &self.desktop_texture);
+            self.desktop_texture = create_texture_from_rgba(
+                &self.device,
+                &unsafe {
+                    self.instance
+                        .get_physical_device_memory_properties(self.physical_device)
+                },
+                self.command_pool,
+                self.queue,
+                snapshot.width,
+                snapshot.height,
+                &snapshot.rgba,
+                vk::Format::R8G8B8A8_UNORM,
+            )?;
+            unsafe {
+                self.device
+                    .destroy_descriptor_pool(self.desktop_descriptor_pool, None);
+            }
+            let (pool, set) = create_texture_descriptor(
+                &self.device,
+                self.descriptor_set_layout,
+                &self.desktop_texture,
+            )?;
+            self.desktop_descriptor_pool = pool;
+            self.desktop_descriptor_set = set;
+            return Ok(());
+        }
+
+        upload_rgba_to_texture(
+            &self.device,
+            &unsafe {
+                self.instance
+                    .get_physical_device_memory_properties(self.physical_device)
+            },
+            self.command_pool,
+            self.queue,
+            &self.desktop_texture,
+            &snapshot.rgba,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn record_command_buffer(
         &mut self,
         frame: usize,
@@ -580,6 +698,7 @@ impl Renderer {
         count: u32,
         rubber_index_count: u32,
         ball_instances: &[Instance],
+        marbles: &[MarbleInstance],
         egui: Option<&EguiDrawData<'_>>,
     ) -> Result<()> {
         let cmd = self.command_buffers[frame];
@@ -741,6 +860,65 @@ impl Renderer {
                 }
             }
 
+            if !marbles.is_empty() {
+                self.device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.marble_pipeline,
+                );
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.marble_pipeline_layout,
+                    0,
+                    &[self.desktop_descriptor_set],
+                    &[],
+                );
+                self.device.cmd_bind_vertex_buffers(
+                    cmd,
+                    0,
+                    &[self.marble_mesh.vertex_buffer.buffer],
+                    &[0],
+                );
+                self.device.cmd_bind_index_buffer(
+                    cmd,
+                    self.marble_mesh.index_buffer.buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                for marble in marbles {
+                    let marble_push = [
+                        [
+                            self.swap.extent.width as f32,
+                            self.swap.extent.height as f32,
+                            marble.center[0],
+                            marble.center[1],
+                        ],
+                        [marble.radius, marble.radius, marble.roll[0], marble.roll[1]],
+                        [
+                            marble.roll[2],
+                            marble.health,
+                            marble.crack,
+                            marble.seed as f32,
+                        ],
+                        marble.primary,
+                        marble.secondary,
+                        marble.accent,
+                        marble.ribbons,
+                        marble.glass,
+                    ];
+                    self.device.cmd_push_constants(
+                        cmd,
+                        self.marble_pipeline_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        bytemuck_bytes(&marble_push),
+                    );
+                    self.device
+                        .cmd_draw_indexed(cmd, self.marble_mesh.index_count, 1, 0, 0, 0);
+                }
+            }
+
             if let Some(egui) = egui {
                 self.egui_renderer
                     .as_mut()
@@ -801,9 +979,14 @@ impl Drop for Renderer {
             for b in &self.rubber_vertex_buffers {
                 destroy_buffer(&self.device, b);
             }
+            destroy_buffer(&self.device, &self.marble_mesh.index_buffer);
+            destroy_buffer(&self.device, &self.marble_mesh.vertex_buffer);
             destroy_buffer(&self.device, &self.ball_mesh.index_buffer);
             destroy_buffer(&self.device, &self.ball_mesh.vertex_buffer);
+            destroy_texture(&self.device, &self.desktop_texture);
             destroy_texture(&self.device, &self.ball_mesh.texture);
+            self.device
+                .destroy_descriptor_pool(self.desktop_descriptor_pool, None);
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device
@@ -813,6 +996,9 @@ impl Drop for Renderer {
             self.device.destroy_pipeline(self.rubber_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.rubber_pipeline_layout, None);
+            self.device.destroy_pipeline(self.marble_pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.marble_pipeline_layout, None);
             self.device.destroy_pipeline(self.mesh_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.mesh_pipeline_layout, None);
@@ -1479,6 +1665,116 @@ fn create_mesh_pipeline(
     Ok((pipeline_layout, pipeline))
 }
 
+fn create_marble_pipeline(
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+) -> Result<(vk::PipelineLayout, vk::Pipeline)> {
+    let vert = create_shader_module(device, MARBLE_VERT_SPV)?;
+    let frag = create_shader_module(device, MARBLE_FRAG_SPV)?;
+
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vert)
+            .name(c"main"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(frag)
+            .name(c"main"),
+    ];
+
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(std::mem::size_of::<MeshVertex>() as u32)
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let attributes = [
+        vk::VertexInputAttributeDescription::default()
+            .location(0)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(0),
+        vk::VertexInputAttributeDescription::default()
+            .location(1)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(12),
+        vk::VertexInputAttributeDescription::default()
+            .location(2)
+            .binding(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(24),
+    ];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&bindings)
+        .vertex_attribute_descriptions(&attributes);
+
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::ONE)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD)
+        .color_write_mask(vk::ColorComponentFlags::RGBA);
+    let blend_attachments = [blend_attachment];
+    let color_blend =
+        vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state =
+        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let push_range = vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+        .offset(0)
+        .size(std::mem::size_of::<[[f32; 4]; 8]>() as u32);
+    let push_ranges = [push_range];
+    let set_layouts = [descriptor_set_layout];
+    let layout_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&set_layouts)
+        .push_constant_ranges(&push_ranges);
+    let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
+
+    let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterizer)
+        .multisample_state(&multisample)
+        .color_blend_state(&color_blend)
+        .dynamic_state(&dynamic_state)
+        .layout(pipeline_layout)
+        .render_pass(render_pass)
+        .subpass(0);
+
+    let pipeline = unsafe {
+        device
+            .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+            .map_err(|(_, e)| anyhow!("failed to create marble graphics pipeline: {e}"))?[0]
+    };
+
+    unsafe {
+        device.destroy_shader_module(vert, None);
+        device.destroy_shader_module(frag, None);
+    }
+
+    Ok((pipeline_layout, pipeline))
+}
+
 fn create_rubber_pipeline(
     device: &ash::Device,
     render_pass: vk::RenderPass,
@@ -1657,6 +1953,86 @@ fn create_ball_mesh(
         index_count: mesh.indices.len() as u32,
         texture,
     })
+}
+
+fn create_marble_mesh(
+    device: &ash::Device,
+    mem_props: &vk::PhysicalDeviceMemoryProperties,
+) -> Result<MeshGeometry> {
+    let (vertices, indices) = generate_uv_sphere(32, 64);
+    let vertex_size = (vertices.len() * std::mem::size_of::<MeshVertex>()) as vk::DeviceSize;
+    let vertex_buffer = create_host_buffer(
+        device,
+        mem_props,
+        vertex_size,
+        vk::BufferUsageFlags::VERTEX_BUFFER,
+    )?;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            vertices.as_ptr() as *const u8,
+            vertex_buffer.mapped,
+            vertex_size as usize,
+        );
+    }
+
+    let index_size = (indices.len() * std::mem::size_of::<u32>()) as vk::DeviceSize;
+    let index_buffer = create_host_buffer(
+        device,
+        mem_props,
+        index_size,
+        vk::BufferUsageFlags::INDEX_BUFFER,
+    )?;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            indices.as_ptr() as *const u8,
+            index_buffer.mapped,
+            index_size as usize,
+        );
+    }
+
+    Ok(MeshGeometry {
+        vertex_buffer,
+        index_buffer,
+        index_count: indices.len() as u32,
+    })
+}
+
+fn generate_uv_sphere(lat_segments: usize, lon_segments: usize) -> (Vec<MeshVertex>, Vec<u32>) {
+    let lat_segments = lat_segments.max(4);
+    let lon_segments = lon_segments.max(8);
+    let mut vertices = Vec::with_capacity((lat_segments + 1) * (lon_segments + 1));
+    let mut indices = Vec::with_capacity(lat_segments * lon_segments * 6);
+
+    for lat in 0..=lat_segments {
+        let v = lat as f32 / lat_segments as f32;
+        let theta = v * std::f32::consts::PI;
+        let y = theta.cos();
+        let ring = theta.sin();
+        for lon in 0..=lon_segments {
+            let u = lon as f32 / lon_segments as f32;
+            let phi = u * std::f32::consts::TAU;
+            let (sin, cos) = phi.sin_cos();
+            let pos = Vec3::new(cos * ring, y, sin * ring);
+            vertices.push(MeshVertex {
+                pos: pos.to_array(),
+                normal: pos.normalize_or_zero().to_array(),
+                uv: [u, v],
+            });
+        }
+    }
+
+    let stride = lon_segments + 1;
+    for lat in 0..lat_segments {
+        for lon in 0..lon_segments {
+            let a = (lat * stride + lon) as u32;
+            let b = a + 1;
+            let c = ((lat + 1) * stride + lon) as u32;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+
+    (vertices, indices)
 }
 
 fn load_ball_mesh(glb: &[u8]) -> Result<LoadedBallMesh> {
@@ -1879,6 +2255,57 @@ fn create_texture(
         .to_rgba8();
     let (width, height) = image.dimensions();
     let pixels = image.into_raw();
+    create_texture_from_rgba(
+        device,
+        mem_props,
+        command_pool,
+        queue,
+        width,
+        height,
+        &pixels,
+        vk::Format::R8G8B8A8_SRGB,
+    )
+}
+
+fn create_default_desktop_texture(
+    device: &ash::Device,
+    mem_props: &vk::PhysicalDeviceMemoryProperties,
+    command_pool: vk::CommandPool,
+    queue: vk::Queue,
+) -> Result<Texture> {
+    let pixels: [u8; 16] = [
+        36, 39, 44, 255, 58, 64, 72, 255, 64, 72, 80, 255, 42, 46, 52, 255,
+    ];
+    create_texture_from_rgba(
+        device,
+        mem_props,
+        command_pool,
+        queue,
+        2,
+        2,
+        &pixels,
+        vk::Format::R8G8B8A8_UNORM,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_texture_from_rgba(
+    device: &ash::Device,
+    mem_props: &vk::PhysicalDeviceMemoryProperties,
+    command_pool: vk::CommandPool,
+    queue: vk::Queue,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    format: vk::Format,
+) -> Result<Texture> {
+    let expected = width as usize * height as usize * 4;
+    if pixels.len() != expected {
+        return Err(anyhow!(
+            "RGBA texture has {} bytes, expected {expected}",
+            pixels.len()
+        ));
+    }
     let size = pixels.len() as vk::DeviceSize;
 
     let staging = create_host_buffer(device, mem_props, size, vk::BufferUsageFlags::TRANSFER_SRC)?;
@@ -1888,7 +2315,7 @@ fn create_texture(
 
     let image_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
-        .format(vk::Format::R8G8B8A8_SRGB)
+        .format(format)
         .extent(vk::Extent3D {
             width,
             height,
@@ -1928,7 +2355,7 @@ fn create_texture(
     let view_info = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
-        .format(vk::Format::R8G8B8A8_SRGB)
+        .format(format)
         .subresource_range(vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
             base_mip_level: 0,
@@ -1956,7 +2383,44 @@ fn create_texture(
         memory,
         view,
         sampler,
+        width,
+        height,
     })
+}
+
+fn upload_rgba_to_texture(
+    device: &ash::Device,
+    mem_props: &vk::PhysicalDeviceMemoryProperties,
+    command_pool: vk::CommandPool,
+    queue: vk::Queue,
+    texture: &Texture,
+    pixels: &[u8],
+) -> Result<()> {
+    let expected = texture.width as usize * texture.height as usize * 4;
+    if pixels.len() != expected {
+        return Err(anyhow!(
+            "RGBA upload has {} bytes, expected {expected}",
+            pixels.len()
+        ));
+    }
+
+    let size = pixels.len() as vk::DeviceSize;
+    let staging = create_host_buffer(device, mem_props, size, vk::BufferUsageFlags::TRANSFER_SRC)?;
+    unsafe {
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), staging.mapped, pixels.len());
+    }
+
+    copy_buffer_to_existing_image(
+        device,
+        command_pool,
+        queue,
+        staging.buffer,
+        texture.image,
+        texture.width,
+        texture.height,
+    )?;
+    destroy_buffer(device, &staging);
+    Ok(())
 }
 
 fn create_texture_descriptor(
@@ -2109,6 +2573,56 @@ fn copy_buffer_to_image(
     end_one_time_commands(device, command_pool, queue, cmd)
 }
 
+fn copy_buffer_to_existing_image(
+    device: &ash::Device,
+    command_pool: vk::CommandPool,
+    queue: vk::Queue,
+    buffer: vk::Buffer,
+    image: vk::Image,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let cmd = begin_one_time_commands(device, command_pool)?;
+    transition_image_layout(
+        device,
+        cmd,
+        image,
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+    );
+
+    let region = vk::BufferImageCopy::default()
+        .image_subresource(vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        })
+        .image_extent(vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        });
+    unsafe {
+        device.cmd_copy_buffer_to_image(
+            cmd,
+            buffer,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[region],
+        );
+    }
+
+    transition_image_layout(
+        device,
+        cmd,
+        image,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+    );
+    end_one_time_commands(device, command_pool, queue, cmd)
+}
+
 fn transition_image_layout(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
@@ -2128,6 +2642,12 @@ fn transition_image_layout(
             vk::AccessFlags::SHADER_READ,
             vk::PipelineStageFlags::TRANSFER,
             vk::PipelineStageFlags::FRAGMENT_SHADER,
+        ),
+        (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
+            vk::AccessFlags::SHADER_READ,
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
         ),
         _ => (
             vk::AccessFlags::empty(),
@@ -2231,11 +2751,10 @@ mod tests {
 
         assert!(!mesh.vertices.is_empty());
         assert!(!mesh.indices.is_empty());
-        assert!(
-            mesh.indices
-                .iter()
-                .all(|&index| index < mesh.vertices.len() as u32)
-        );
+        assert!(mesh
+            .indices
+            .iter()
+            .all(|&index| index < mesh.vertices.len() as u32));
         assert!(mesh.vertices.iter().any(|vertex| vertex.rubber[1] > 0.95));
     }
 
@@ -2260,5 +2779,17 @@ mod tests {
         assert!(is_ball_mesh_material(1.0));
         assert!(!is_ball_mesh_material(0.0));
         assert!(!is_ball_mesh_material(2.0));
+    }
+
+    #[test]
+    fn generated_marble_sphere_has_valid_indices() {
+        let (vertices, indices) = generate_uv_sphere(12, 24);
+
+        assert!(!vertices.is_empty());
+        assert!(!indices.is_empty());
+        assert!(indices.iter().all(|&index| index < vertices.len() as u32));
+        assert!(vertices
+            .iter()
+            .all(|vertex| Vec3::from_array(vertex.normal).length() > 0.99));
     }
 }
