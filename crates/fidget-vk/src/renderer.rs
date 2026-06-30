@@ -494,7 +494,7 @@ impl Renderer {
         unsafe {
             let dst = self.instance_buffers[frame].mapped as *mut Instance;
             for instance in instances {
-                if instance.material > 0.5 {
+                if is_ball_mesh_material(instance.material) {
                     ball_instances.push(*instance);
                 } else if count < MAX_INSTANCES {
                     dst.add(count).write(*instance);
@@ -772,6 +772,10 @@ impl Renderer {
                 .destroy_swapchain(self.swap.swapchain, None);
         }
     }
+}
+
+fn is_ball_mesh_material(material: f32) -> bool {
+    (material - 1.0).abs() < 0.25
 }
 
 impl Drop for Renderer {
@@ -2249,5 +2253,12 @@ mod tests {
         ];
 
         assert!(sample_rubber_path(&bent).len() > sample_rubber_path(&straight).len());
+    }
+
+    #[test]
+    fn only_soccer_material_routes_to_ball_mesh() {
+        assert!(is_ball_mesh_material(1.0));
+        assert!(!is_ball_mesh_material(0.0));
+        assert!(!is_ball_mesh_material(2.0));
     }
 }

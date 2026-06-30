@@ -3,7 +3,7 @@
 layout(location = 0) in vec2 v_local;     // [-1,1] quad-local coords
 layout(location = 1) in vec4 v_color;     // rgba (a = intensity)
 layout(location = 2) in float v_softness; // edge softness
-layout(location = 3) in float v_material; // 0 = glow blob, 1 = soccer ball
+layout(location = 3) in float v_material; // 0 = glow blob, 1 = soccer ball, 2 = dust
 layout(location = 4) in vec4 v_roll;      // xy = movement axis, z = roll angle
 
 layout(set = 0, binding = 0) uniform sampler2D u_ball_texture;
@@ -46,9 +46,33 @@ vec4 soccer_ball(vec2 local) {
     return vec4(color * alpha, alpha);
 }
 
+float hash12(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+vec4 dust_blob(vec2 local) {
+    float d = length(local);
+    if (d > 1.0) {
+        discard;
+    }
+
+    vec2 cell = floor((local + 1.0) * vec2(7.0, 7.0) + v_roll.zw);
+    float grain = hash12(cell);
+    float broken = smoothstep(0.38, 0.96, grain);
+    float core = 1.0 - smoothstep(0.12, 1.0, d);
+    float edge = 1.0 - smoothstep(0.78, 1.0, d);
+    float a = core * edge * (0.45 + broken * 0.75);
+    a *= step(0.18, grain) * v_color.a;
+    return vec4(v_color.rgb * a, a);
+}
+
 void main() {
-    if (v_material > 0.5) {
+    if (abs(v_material - 1.0) < 0.25) {
         frag = soccer_ball(v_local);
+        return;
+    }
+    if (v_material > 1.5) {
+        frag = dust_blob(v_local);
         return;
     }
 

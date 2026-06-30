@@ -3,15 +3,17 @@
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use fidget_sim::{BottomEdge, Bounds, ParticleKind, World};
+use fidget_sim::{BottomEdge, Bounds, DEFAULT_RECALL_MARGIN, ParticleKind, World};
 use glam::{Vec2, Vec3, Vec4};
 
-use crate::config::Settings;
+use crate::config::{Settings, ToySize};
 use crate::renderer::{Instance, RubberBandMesh};
 
 const SOCCER_GLOW_TEXTURE_PNG: &[u8] =
     include_bytes!("../../../../assets/soccer_ball_material.png");
 static SOCCER_GLOW_TEXTURE: OnceLock<Option<image::RgbaImage>> = OnceLock::new();
+const INTRO_HINT_VISIBLE_SECS: f32 = 5.0;
+const INTRO_HINT_FADE_SECS: f32 = 1.65;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AppAction {
@@ -20,8 +22,10 @@ pub(super) enum AppAction {
     ToggleSpringVisual,
     ToggleGravity,
     ToggleBottomBounce,
+    ToggleSingleMonitorBounds,
     ToggleHud,
     Nudge,
+    SetToySize(ToySize),
 }
 
 pub(super) struct Core {
@@ -29,6 +33,11 @@ pub(super) struct Core {
     world: World,
     start: Instant,
     last_frame: Instant,
+    virtual_bounds: Bounds,
+    monitor_bounds: Vec<Bounds>,
+    primary_monitor: usize,
+    active_monitor: usize,
+    monitor_layout_known: bool,
     cursor: Vec2,
     spring_interaction_active: bool,
     instances: Vec<Instance>,
@@ -36,6 +45,21 @@ pub(super) struct Core {
     egui_ctx: egui::Context,
     hud_visible: bool,
     hud_rect: Option<egui::Rect>,
+    intro_hint: IntroHint,
+    spawn_seed: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct IntroHint {
+    fade_started_at: Option<f32>,
+    done: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IntroHintVisual {
+    alpha: f32,
+    fade: f32,
+    time: f32,
 }
 
 impl Core {
@@ -47,6 +71,11 @@ impl Core {
             world,
             start: Instant::now(),
             last_frame: Instant::now(),
+            virtual_bounds: bounds,
+            monitor_bounds: vec![bounds],
+            primary_monitor: 0,
+            active_monitor: 0,
+            monitor_layout_known: false,
             cursor: Vec2::ZERO,
             spring_interaction_active: false,
             instances: Vec::with_capacity(4096),
@@ -54,6 +83,8 @@ impl Core {
             egui_ctx: egui::Context::default(),
             hud_visible: false,
             hud_rect: None,
+            intro_hint: IntroHint::default(),
+            spawn_seed: 0xA53C_92D1,
         }
     }
 
@@ -82,18 +113,40 @@ impl Core {
         let dt = (now - self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
         self.world.advance(dt);
+        self.update_intro_hint();
     }
 
     pub(super) fn resize(&mut self, width: u32, height: u32) {
-        self.world
-            .set_bounds(Bounds::new(0.0, 0.0, width as f32, height as f32));
+        self.virtual_bounds = Bounds::new(0.0, 0.0, width as f32, height as f32);
+        if !self.monitor_layout_known {
+            self.monitor_bounds.clear();
+            self.monitor_bounds.push(self.virtual_bounds);
+            self.primary_monitor = 0;
+            self.active_monitor = 0;
+        }
+        self.apply_monitor_bounds(false);
     }
 
-    pub(super) fn set_bottom_edges<I>(&mut self, edges: I)
+    pub(super) fn set_monitor_layout<I>(&mut self, monitors: I, primary_monitor: usize)
     where
-        I: IntoIterator<Item = BottomEdge>,
+        I: IntoIterator<Item = Bounds>,
     {
-        self.world.set_bottom_edges(edges);
+        let had_layout = self.monitor_layout_known;
+        self.monitor_bounds = monitors
+            .into_iter()
+            .filter(|bounds| bounds.width() > 1.0 && bounds.height() > 1.0)
+            .collect();
+        if self.monitor_bounds.is_empty() {
+            self.monitor_bounds.push(self.virtual_bounds);
+        }
+        self.primary_monitor = primary_monitor.min(self.monitor_bounds.len() - 1);
+        if self.settings.sim.single_monitor_bounds && !had_layout {
+            self.active_monitor = self.primary_monitor;
+        } else {
+            self.active_monitor = self.active_monitor.min(self.monitor_bounds.len() - 1);
+        }
+        self.monitor_layout_known = true;
+        self.apply_monitor_bounds(self.settings.sim.single_monitor_bounds && !had_layout);
     }
 
     pub(super) fn save_settings(&self) {
@@ -116,6 +169,11 @@ impl Core {
     }
 
     #[cfg(target_os = "windows")]
+    pub(super) fn toy_size(&self) -> ToySize {
+        self.settings.sim.toy_size
+    }
+
+    #[cfg(target_os = "windows")]
     pub(super) fn rubber_band_visual_enabled(&self) -> bool {
         self.settings.visuals.spring_visual.is_rubber_band()
     }
@@ -125,11 +183,19 @@ impl Core {
         self.world.bottom_bounce_enabled()
     }
 
+    #[cfg(target_os = "windows")]
+    pub(super) fn single_monitor_bounds_enabled(&self) -> bool {
+        self.settings.sim.single_monitor_bounds
+    }
+
     pub(super) fn on_cursor_moved(&mut self, cursor: Vec2) {
         self.cursor = cursor;
         let now = self.now();
         if self.spring_interaction_active {
             self.world.interact_spring(cursor, now);
+            if self.spring_is_cursor_dragged() {
+                self.update_single_monitor_from_cursor(cursor);
+            }
         } else {
             self.world.move_cursor(cursor, now);
         }
@@ -137,7 +203,11 @@ impl Core {
 
     pub(super) fn on_left_pressed(&mut self) -> bool {
         let now = self.now();
-        self.world.grab(self.cursor, now)
+        let grabbed = self.world.grab(self.cursor, now);
+        if grabbed {
+            self.start_intro_hint_fade(now);
+        }
+        grabbed
     }
 
     pub(super) fn on_left_released(&mut self) {
@@ -148,6 +218,7 @@ impl Core {
     pub(super) fn on_right_pressed(&mut self) {
         self.spring_interaction_active = true;
         let now = self.now();
+        self.start_intro_hint_fade(now);
         self.world.interact_spring(self.cursor, now);
     }
 
@@ -160,8 +231,18 @@ impl Core {
 
     pub(super) fn apply_action(&mut self, action: AppAction) {
         match action {
-            AppAction::Reset => self.world.reset(),
-            AppAction::ToggleSpring => self.world.toggle_spring(),
+            AppAction::Reset => {
+                self.start_intro_hint_fade(self.now());
+                self.spawn_ball_random();
+            }
+            AppAction::ToggleSpring => {
+                self.start_intro_hint_fade(self.now());
+                if self.world.ball_visible() {
+                    self.world.toggle_spring();
+                } else {
+                    self.spawn_ball_random();
+                }
+            }
             AppAction::ToggleSpringVisual => {
                 self.settings.visuals.spring_visual = self.settings.visuals.spring_visual.toggled();
             }
@@ -170,115 +251,400 @@ impl Core {
                 let enabled = !self.world.bottom_bounce_enabled();
                 self.world.set_bottom_bounce_enabled(enabled);
                 self.settings.sim.bounce_bottom_edge = enabled;
+                self.apply_pit_recall_margin();
+            }
+            AppAction::ToggleSingleMonitorBounds => {
+                let enabled = !self.settings.sim.single_monitor_bounds;
+                self.settings.sim.single_monitor_bounds = enabled;
+                if enabled {
+                    self.active_monitor = self.primary_monitor;
+                }
+                self.apply_monitor_bounds(enabled);
             }
             AppAction::ToggleHud => self.hud_visible = !self.hud_visible,
-            AppAction::Nudge => self.world.nudge(2800.0),
+            AppAction::Nudge => {
+                self.start_intro_hint_fade(self.now());
+                self.world.nudge(2800.0);
+            }
+            AppAction::SetToySize(size) => self.apply_toy_size(size),
         }
     }
 
     pub(super) fn show_hud(&mut self, ctx: &egui::Context) {
-        let window_response = if !self.hud_visible {
-            egui::Window::new("HUD")
-                .title_bar(false)
-                .resizable(false)
-                .collapsible(false)
-                .fixed_pos(egui::pos2(18.0, 18.0))
-                .show(ctx, |ui| {
-                    if ui.button("Show Fidget controls").clicked() {
-                        self.hud_visible = true;
-                    }
-                })
-        } else {
-            egui::Window::new("Fidget controls")
-                .default_pos(egui::pos2(18.0, 18.0))
-                .default_width(290.0)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("H toggles this HUD");
-                        if ui.button("Hide").clicked() {
-                            self.hud_visible = false;
-                        }
-                    });
-                    ui.separator();
+        self.show_intro_hints(ctx);
+        if !self.hud_visible {
+            self.hud_rect = None;
+            return;
+        }
 
-                    let old_gravity = self.world.gravity_strength();
-                    let mut gravity = old_gravity;
-                    ui.horizontal(|ui| {
-                        if ui.button("-").clicked() {
-                            gravity -= 150.0;
-                        }
-                        ui.add(egui::Slider::new(&mut gravity, 0.0..=2400.0).text("gravity"));
-                        if ui.button("+").clicked() {
-                            gravity += 150.0;
-                        }
-                    });
-                    if (gravity - old_gravity).abs() > f32::EPSILON {
-                        self.world.set_gravity_strength(gravity);
+        let window_response = egui::Window::new("Fidget controls")
+            .default_pos(egui::pos2(18.0, 18.0))
+            .default_width(290.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("H toggles this HUD");
+                    if ui.button("Hide").clicked() {
+                        self.hud_visible = false;
                     }
+                });
+                ui.separator();
 
-                    let old_stiffness = self.world.spring_stiffness();
-                    let mut stiffness = old_stiffness;
-                    ui.horizontal(|ui| {
-                        if ui.button("soft").clicked() {
-                            stiffness -= 25.0;
-                        }
-                        ui.add(
-                            egui::Slider::new(&mut stiffness, 15.0..=420.0)
-                                .text("string elasticity"),
-                        );
-                        if ui.button("stiff").clicked() {
-                            stiffness += 25.0;
-                        }
-                    });
-                    if (stiffness - old_stiffness).abs() > f32::EPSILON {
-                        self.world.set_spring_stiffness(stiffness);
+                let old_gravity = self.world.gravity_strength();
+                let mut gravity = old_gravity;
+                ui.horizontal(|ui| {
+                    if ui.button("-").clicked() {
+                        gravity -= 150.0;
                     }
-
-                    let old_damping = self.world.spring_damping();
-                    let mut damping = old_damping;
-                    ui.horizontal(|ui| {
-                        if ui.button("-").clicked() {
-                            damping -= 6.0;
-                        }
-                        ui.add(egui::Slider::new(&mut damping, 2.0..=90.0).text("string damping"));
-                        if ui.button("+").clicked() {
-                            damping += 6.0;
-                        }
-                    });
-                    if (damping - old_damping).abs() > f32::EPSILON {
-                        self.world.set_spring_damping(damping);
+                    ui.add(egui::Slider::new(&mut gravity, 0.0..=2400.0).text("gravity"));
+                    if ui.button("+").clicked() {
+                        gravity += 150.0;
                     }
+                });
+                if (gravity - old_gravity).abs() > f32::EPSILON {
+                    self.world.set_gravity_strength(gravity);
+                }
 
-                    let old_hook = self.world.hook_offset_y();
-                    let mut hook = old_hook;
-                    ui.horizontal(|ui| {
-                        if ui.button("Hook higher").clicked() {
-                            hook -= 60.0;
-                        }
-                        if ui.button("Hook lower").clicked() {
-                            hook += 60.0;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Slider::new(&mut hook, -600.0..=260.0).text("hook y offset"));
-                    });
-                    if (hook - old_hook).abs() > f32::EPSILON {
-                        self.world.set_hook_offset_y(hook);
+                let old_stiffness = self.world.spring_stiffness();
+                let mut stiffness = old_stiffness;
+                ui.horizontal(|ui| {
+                    if ui.button("soft").clicked() {
+                        stiffness -= 25.0;
                     }
-                    ui.small("Negative hook offset places the string hook above the desktop.");
+                    ui.add(
+                        egui::Slider::new(&mut stiffness, 15.0..=420.0).text("string elasticity"),
+                    );
+                    if ui.button("stiff").clicked() {
+                        stiffness += 25.0;
+                    }
+                });
+                if (stiffness - old_stiffness).abs() > f32::EPSILON {
+                    self.world.set_spring_stiffness(stiffness);
+                }
 
-                    ui.horizontal(|ui| {
-                        if ui.button("Reset ball").clicked() {
-                            self.world.reset();
+                let old_damping = self.world.spring_damping();
+                let mut damping = old_damping;
+                ui.horizontal(|ui| {
+                    if ui.button("-").clicked() {
+                        damping -= 6.0;
+                    }
+                    ui.add(egui::Slider::new(&mut damping, 2.0..=90.0).text("string damping"));
+                    if ui.button("+").clicked() {
+                        damping += 6.0;
+                    }
+                });
+                if (damping - old_damping).abs() > f32::EPSILON {
+                    self.world.set_spring_damping(damping);
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("size");
+                    for (label, size) in [
+                        ("S", ToySize::Small),
+                        ("M", ToySize::Medium),
+                        ("L", ToySize::Large),
+                    ] {
+                        if ui
+                            .selectable_label(self.settings.sim.toy_size == size, label)
+                            .clicked()
+                        {
+                            self.apply_toy_size(size);
                         }
-                        if ui.button("Cut/recall").clicked() {
-                            self.world.toggle_spring();
-                        }
-                    });
-                })
-        };
+                    }
+                });
+
+                let old_thickness = self.settings.visuals.rubber_band_thickness;
+                let mut thickness = old_thickness;
+                ui.horizontal(|ui| {
+                    if ui.button("thinner").clicked() {
+                        thickness -= 0.08;
+                    }
+                    ui.add(egui::Slider::new(&mut thickness, 0.4..=1.25).text("rubber thickness"));
+                    if ui.button("fuller").clicked() {
+                        thickness += 0.08;
+                    }
+                });
+                self.settings.visuals.rubber_band_thickness = thickness.clamp(0.4, 1.25);
+
+                let old_hook = self.world.hook_offset_y();
+                let mut hook = old_hook;
+                ui.horizontal(|ui| {
+                    if ui.button("Hook higher").clicked() {
+                        hook -= 60.0;
+                    }
+                    if ui.button("Hook lower").clicked() {
+                        hook += 60.0;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::Slider::new(&mut hook, -600.0..=260.0).text("hook y offset"));
+                });
+                if (hook - old_hook).abs() > f32::EPSILON {
+                    self.world.set_hook_offset_y(hook);
+                }
+                ui.small("Negative hook offset places the string hook above the desktop.");
+
+                ui.horizontal(|ui| {
+                    if ui.button("Spawn ball").clicked() {
+                        self.start_intro_hint_fade(self.now());
+                        self.spawn_ball_random();
+                    }
+                    if ui.button("Cut/recall").clicked() {
+                        self.start_intro_hint_fade(self.now());
+                        self.world.toggle_spring();
+                    }
+                });
+            });
 
         self.hud_rect = window_response.map(|response| response.response.rect.expand(8.0));
+    }
+
+    fn apply_monitor_bounds(&mut self, reset_ball: bool) {
+        let bounds = self.active_sim_bounds();
+        self.world.set_bounds(bounds);
+        if self.settings.sim.single_monitor_bounds {
+            self.world
+                .set_bottom_edges([BottomEdge::from_bounds(bounds)]);
+        } else {
+            self.world.set_bottom_edges(BottomEdge::exposed_from_bounds(
+                &self.monitor_bounds,
+                self.virtual_bounds,
+            ));
+        }
+        if reset_ball {
+            self.world.reset();
+        }
+        self.apply_pit_recall_margin();
+    }
+
+    fn active_sim_bounds(&self) -> Bounds {
+        if self.settings.sim.single_monitor_bounds {
+            self.monitor_bounds
+                .get(self.active_monitor)
+                .copied()
+                .unwrap_or(self.virtual_bounds)
+        } else {
+            self.virtual_bounds
+        }
+    }
+
+    fn update_single_monitor_from_cursor(&mut self, cursor: Vec2) {
+        if !self.settings.sim.single_monitor_bounds {
+            return;
+        }
+        let Some(index) = self.monitor_index_at(cursor) else {
+            return;
+        };
+        if index != self.active_monitor {
+            self.active_monitor = index;
+            self.apply_monitor_bounds(false);
+        }
+    }
+
+    fn apply_pit_recall_margin(&mut self) {
+        let margin =
+            if self.settings.sim.single_monitor_bounds && !self.world.bottom_bounce_enabled() {
+                0.0
+            } else {
+                DEFAULT_RECALL_MARGIN
+            };
+        self.world.set_recall_margin(margin);
+    }
+
+    fn apply_toy_size(&mut self, size: ToySize) {
+        if self.settings.sim.toy_size == size {
+            return;
+        }
+        self.settings.sim.toy_size = size;
+        self.world.set_size(
+            size.ball_radius(),
+            size.interaction_scale(),
+            size.length_scale(),
+        );
+    }
+
+    fn spawn_ball_random(&mut self) {
+        let bounds = self.random_spawn_bounds();
+        let radius = self.world.ball.radius;
+        let margin = (radius * 2.8).clamp(72.0, 180.0);
+        let min_x = bounds.left + margin;
+        let max_x = bounds.right - margin;
+        let min_y = bounds.top + margin;
+        let max_y = bounds.bottom - margin;
+        let pos = Vec2::new(
+            if min_x < max_x {
+                min_x + (max_x - min_x) * self.next_spawn_rand()
+            } else {
+                bounds.center().x
+            },
+            if min_y < max_y {
+                min_y + (max_y - min_y) * self.next_spawn_rand()
+            } else {
+                bounds.center().y
+            },
+        );
+        self.world.spawn_attached_at(pos);
+    }
+
+    fn random_spawn_bounds(&mut self) -> Bounds {
+        if self.settings.sim.single_monitor_bounds {
+            return self.active_sim_bounds();
+        }
+
+        let monitors: Vec<Bounds> = self
+            .monitor_bounds
+            .iter()
+            .copied()
+            .filter(|bounds| bounds.width() > 1.0 && bounds.height() > 1.0)
+            .collect();
+        if monitors.is_empty() {
+            return self.virtual_bounds;
+        }
+
+        let index = ((self.next_spawn_rand() * monitors.len() as f32) as usize)
+            .min(monitors.len().saturating_sub(1));
+        monitors[index]
+    }
+
+    fn next_spawn_rand(&mut self) -> f32 {
+        let mut x = self.spawn_seed;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.spawn_seed = x;
+        (x as f32 / u32::MAX as f32).clamp(0.0, 1.0)
+    }
+
+    fn spring_is_cursor_dragged(&self) -> bool {
+        self.world.spring.attached
+            && (self.world.spring.entanglement.is_some()
+                || self
+                    .world
+                    .spring
+                    .intersection
+                    .is_some_and(|intersection| !intersection.max_age.is_finite()))
+    }
+
+    fn monitor_index_at(&self, point: Vec2) -> Option<usize> {
+        self.monitor_bounds
+            .iter()
+            .position(|bounds| bounds_contains(*bounds, point))
+    }
+
+    fn update_intro_hint(&mut self) {
+        if self.intro_hint.done {
+            return;
+        }
+        let now = self.now();
+        if self.intro_hint.fade_started_at.is_none() && now >= INTRO_HINT_VISIBLE_SECS {
+            self.intro_hint.fade_started_at = Some(now);
+        }
+        if self
+            .intro_hint
+            .fade_started_at
+            .is_some_and(|started| now - started >= INTRO_HINT_FADE_SECS)
+        {
+            self.intro_hint.done = true;
+        }
+    }
+
+    fn start_intro_hint_fade(&mut self, now: f32) {
+        if !self.intro_hint.done && self.intro_hint.fade_started_at.is_none() {
+            self.intro_hint.fade_started_at = Some(now);
+        }
+    }
+
+    fn intro_hint_visual(&self) -> Option<IntroHintVisual> {
+        if self.intro_hint.done {
+            return None;
+        }
+        let time = self.now();
+        let fade = self
+            .intro_hint
+            .fade_started_at
+            .map(|started| ((time - started) / INTRO_HINT_FADE_SECS).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        if fade >= 1.0 {
+            return None;
+        }
+        let eased = fade * fade * (3.0 - 2.0 * fade);
+        Some(IntroHintVisual {
+            alpha: (1.0 - eased).powf(1.25),
+            fade: eased,
+            time,
+        })
+    }
+
+    fn show_intro_hints(&self, ctx: &egui::Context) {
+        let Some(visual) = self.intro_hint_visual() else {
+            return;
+        };
+        if !self.world.ball_visible() {
+            return;
+        }
+        ctx.request_repaint();
+
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("intro_action_hints"),
+        ));
+        let ball = &self.world.ball;
+        let bounds = self.world.bounds;
+        let label_y =
+            (ball.pos.y + ball.radius + 30.0).clamp(bounds.top + 26.0, bounds.bottom - 38.0);
+        let x_guard = (bounds.width() * 0.38).clamp(120.0, 240.0);
+        let left_label = Vec2::new(
+            (ball.pos.x - 12.0).clamp(bounds.left + x_guard, bounds.right - 16.0),
+            label_y,
+        );
+        let right_label = Vec2::new(
+            (ball.pos.x + 12.0).clamp(bounds.left + 16.0, bounds.right - x_guard),
+            label_y,
+        );
+
+        if self.world.spring.attached {
+            let (start, end) = spring_hint_segment(&self.world);
+            let delta = end - start;
+            if delta.length_squared() > 1.0 {
+                let normal = Vec2::new(-delta.y, delta.x).normalize_or_zero();
+                let center = start + delta * 0.43;
+                let half_len = (self.world.ball.radius * 2.1).clamp(58.0, 110.0);
+                draw_dashed_hint_line(
+                    &painter,
+                    center - normal * half_len,
+                    center + normal * half_len,
+                    visual,
+                );
+                let cut_pos = center + normal * (half_len + 18.0);
+                draw_hint_text(
+                    &painter,
+                    "cut",
+                    cut_pos,
+                    egui::Align2::CENTER_CENTER,
+                    17.0,
+                    visual,
+                    3.0,
+                );
+            }
+        }
+
+        draw_hint_text(
+            &painter,
+            "left click mouse = holds the ball",
+            left_label,
+            egui::Align2::RIGHT_TOP,
+            15.0,
+            visual,
+            11.0,
+        );
+        draw_hint_text(
+            &painter,
+            "right click = kick the ball",
+            right_label,
+            egui::Align2::LEFT_TOP,
+            15.0,
+            visual,
+            17.0,
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -295,6 +661,9 @@ impl Core {
             return true;
         }
         let ball = &self.world.ball;
+        if !self.world.ball_visible() {
+            return false;
+        }
         if cursor.distance(ball.pos) <= ball.radius + 12.0 {
             return true;
         }
@@ -307,6 +676,10 @@ impl Core {
         let rubber_visual = self.settings.visuals.spring_visual.is_rubber_band();
         self.instances.clear();
         self.rubber_band.clear();
+
+        if !world.ball_visible() {
+            return;
+        }
 
         // Trail (drawn first, faint and soft). Rubber-band mode uses faded
         // ball ghosts instead of the default blue glow trail.
@@ -330,9 +703,18 @@ impl Core {
 
         if world.spring.attached {
             if rubber_visual {
-                rebuild_rubber_band(&mut self.rubber_band, world);
+                rebuild_rubber_band(
+                    &mut self.rubber_band,
+                    world,
+                    self.settings.visuals.rubber_band_thickness
+                        * self.settings.sim.toy_size.band_scale(),
+                );
             } else {
-                push_spring_instances(&mut self.instances, world);
+                push_spring_instances(
+                    &mut self.instances,
+                    world,
+                    self.settings.sim.toy_size.interaction_scale(),
+                );
             }
         }
 
@@ -382,6 +764,9 @@ impl Core {
         if rubber_visual && cfg.trail_enabled {
             push_ball_trail_instances(&mut self.instances, world, roll_dir, ball.roll_angle);
         }
+        if let Some(hint) = self.intro_hint_visual() {
+            push_intro_hint_dust_instances(&mut self.instances, world, hint);
+        }
 
         self.instances.push(Instance {
             center: c,
@@ -405,6 +790,185 @@ impl Core {
             roll,
         });
     }
+}
+
+fn spring_hint_segment(world: &World) -> (Vec2, Vec2) {
+    let start = world.spring.anchor;
+    let end = world.ball.pos;
+    if start.y >= world.bounds.top || (end.y - start.y).abs() <= 1.0 {
+        return (start, end);
+    }
+    let t = ((world.bounds.top - start.y) / (end.y - start.y)).clamp(0.0, 1.0);
+    (start.lerp(end, t), end)
+}
+
+fn draw_dashed_hint_line(painter: &egui::Painter, start: Vec2, end: Vec2, visual: IntroHintVisual) {
+    let delta = end - start;
+    let len = delta.length();
+    if len <= 2.0 {
+        return;
+    }
+
+    let dir = delta / len;
+    let dash = 18.0;
+    let gap = 10.0;
+    let mut cursor = 0.0;
+    let mut index = 0.0;
+    while cursor < len {
+        let next = (cursor + dash).min(len);
+        let offset = dust_wind_offset(index + 5.0, visual, 30.0);
+        let a = start + dir * cursor + offset;
+        let b = start + dir * next + offset;
+        let alpha = visual.alpha * (1.0 - visual.fade * 0.35);
+        let stroke = egui::Stroke::new(2.0 - visual.fade * 0.7, hint_color(alpha));
+        painter.line_segment([pos2(a), pos2(b)], stroke);
+        cursor += dash + gap;
+        index += 1.0;
+    }
+}
+
+fn draw_hint_text(
+    painter: &egui::Painter,
+    text: &str,
+    pos: Vec2,
+    align: egui::Align2,
+    size: f32,
+    visual: IntroHintVisual,
+    seed: f32,
+) {
+    let font = egui::FontId::proportional(size);
+    let shadow = Vec2::new(0.0, 1.5);
+    painter.text(
+        pos2(pos + shadow),
+        align,
+        text,
+        font.clone(),
+        egui::Color32::from_rgba_unmultiplied(18, 15, 10, (110.0 * visual.alpha) as u8),
+    );
+
+    if visual.fade > 0.01 {
+        for i in 0..7 {
+            let n = seed + i as f32 * 2.71;
+            let offset = dust_wind_offset(n, visual, 42.0 + i as f32 * 3.0);
+            let alpha = visual.alpha * visual.fade * (0.18 - i as f32 * 0.016).max(0.04);
+            painter.text(
+                pos2(pos + offset),
+                align,
+                text,
+                font.clone(),
+                hint_color(alpha),
+            );
+        }
+    }
+
+    painter.text(pos2(pos), align, text, font, hint_color(visual.alpha));
+}
+
+fn push_intro_hint_dust_instances(
+    instances: &mut Vec<Instance>,
+    world: &World,
+    visual: IntroHintVisual,
+) {
+    if visual.fade <= 0.01 {
+        return;
+    }
+
+    let ball = &world.ball;
+    let label_y = (ball.pos.y + ball.radius + 42.0)
+        .clamp(world.bounds.top + 30.0, world.bounds.bottom - 34.0);
+    let left_center = Vec2::new(ball.pos.x - ball.radius * 1.9, label_y + 7.0);
+    let right_center = Vec2::new(ball.pos.x + ball.radius * 1.75, label_y + 7.0);
+    push_dust_cloud(
+        instances,
+        left_center,
+        Vec2::new(155.0, 17.0),
+        46,
+        visual,
+        23.0,
+    );
+    push_dust_cloud(
+        instances,
+        right_center,
+        Vec2::new(128.0, 17.0),
+        40,
+        visual,
+        47.0,
+    );
+
+    if world.spring.attached {
+        let (start, end) = spring_hint_segment(world);
+        let center = start.lerp(end, 0.43);
+        let extent = Vec2::new(start.distance(end).min(180.0) * 0.45, 20.0);
+        push_dust_cloud(instances, center, extent, 34, visual, 71.0);
+    }
+}
+
+fn push_dust_cloud(
+    instances: &mut Vec<Instance>,
+    center: Vec2,
+    half: Vec2,
+    count: usize,
+    visual: IntroHintVisual,
+    seed: f32,
+) {
+    let fade = visual.fade;
+    for i in 0..count {
+        let id = seed + i as f32;
+        let local = Vec2::new(hash_signed(id * 3.1), hash_signed(id * 5.7));
+        let wind = Vec2::new(72.0, -26.0) * fade.powf(1.15);
+        let flutter = Vec2::new(
+            (visual.time * (1.8 + hash01(id) * 2.5) + id).sin(),
+            (visual.time * (1.4 + hash01(id + 9.0) * 2.1) + id * 0.7).cos(),
+        ) * (8.0 + hash01(id + 13.0) * 18.0)
+            * fade;
+        let pos = center + local * half + wind * (0.35 + hash01(id + 4.0) * 0.9) + flutter;
+        let size = 1.2 + hash01(id + 19.0) * 4.8;
+        let alpha = visual.alpha * fade * (0.12 + hash01(id + 29.0) * 0.22);
+        instances.push(Instance {
+            center: pos.to_array(),
+            half: [size, size],
+            color: [0.94, 0.88, 0.74, alpha],
+            softness: 0.82,
+            material: 2.0,
+            roll: [1.0, 0.0, visual.time + id * 0.13, id],
+        });
+    }
+}
+
+fn dust_wind_offset(seed: f32, visual: IntroHintVisual, strength: f32) -> Vec2 {
+    if visual.fade <= 0.0 {
+        return Vec2::ZERO;
+    }
+    let wind = Vec2::new(strength, -strength * 0.36) * visual.fade.powf(1.18);
+    let flutter = Vec2::new(
+        (visual.time * 2.1 + seed * 1.7).sin(),
+        (visual.time * 1.7 + seed * 2.3).cos(),
+    ) * (visual.fade * strength * 0.18);
+    wind * (0.45 + hash01(seed) * 0.8) + flutter
+}
+
+fn hint_color(alpha: f32) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(244, 230, 196, (alpha.clamp(0.0, 1.0) * 255.0) as u8)
+}
+
+fn pos2(v: Vec2) -> egui::Pos2 {
+    egui::pos2(v.x, v.y)
+}
+
+fn bounds_contains(bounds: Bounds, point: Vec2) -> bool {
+    point.x >= bounds.left
+        && point.x <= bounds.right
+        && point.y >= bounds.top
+        && point.y <= bounds.bottom
+}
+
+fn hash01(seed: f32) -> f32 {
+    let x = (seed * 12.9898 + 78.233).sin() * 43_758.547;
+    x - x.floor()
+}
+
+fn hash_signed(seed: f32) -> f32 {
+    hash01(seed) * 2.0 - 1.0
 }
 
 fn rubber_ball_glow_color(roll_dir: Vec2, roll_angle: f32) -> Vec4 {
@@ -521,7 +1085,7 @@ fn push_ball_trail_instances(
     }
 }
 
-fn rebuild_rubber_band(mesh: &mut RubberBandMesh, world: &World) {
+fn rebuild_rubber_band(mesh: &mut RubberBandMesh, world: &World, thickness: f32) {
     let anchor = world.spring.anchor;
     let ball = world.ball.pos;
     let mut path = Vec::with_capacity(32);
@@ -554,7 +1118,8 @@ fn rebuild_rubber_band(mesh: &mut RubberBandMesh, world: &World) {
     joints.push(ball_joint);
 
     let stretch = anchor.distance(ball).max(1.0) / world.spring.rest_length.max(1.0);
-    let radius = (8.8 / stretch.sqrt()).clamp(4.8, 10.5);
+    let thickness = thickness.clamp(0.12, 1.25);
+    let radius = (8.8 * thickness / stretch.sqrt()).clamp(1.1, 10.5);
     let primary = Vec4::new(0.56, 0.36, 0.17, 1.0);
     let accent = Vec4::new(0.94, 0.73, 0.43, 1.0);
     mesh.rebuild(&path, &joints, primary, accent, radius);
@@ -569,7 +1134,8 @@ fn ball_band_attach(ball: Vec2, from: Vec2, radius: f32) -> Vec2 {
     }
 }
 
-fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
+fn push_spring_instances(instances: &mut Vec<Instance>, world: &World, scale: f32) {
+    let scale = scale.clamp(0.45, 1.25);
     let anchor = world.spring.anchor;
     let ball = world.ball.pos;
     let outer = world.config.color_outer;
@@ -577,7 +1143,7 @@ fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
 
     instances.push(Instance {
         center: anchor.to_array(),
-        half: [8.0, 8.0],
+        half: [8.0 * scale, 8.0 * scale],
         color: [inner.x, inner.y, inner.z, 0.85],
         softness: 0.75,
         material: 0.0,
@@ -585,14 +1151,31 @@ fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
     });
 
     if let Some(entanglement) = world.spring.entanglement {
-        push_coil_instances(instances, anchor, entanglement.center, outer, 0.5, 3.8, 9.0);
-        push_coil_instances(instances, entanglement.center, ball, outer, 0.72, 4.8, 13.0);
+        push_coil_instances(
+            instances,
+            anchor,
+            entanglement.center,
+            outer,
+            0.5,
+            3.8 * scale,
+            9.0 * scale,
+        );
+        push_coil_instances(
+            instances,
+            entanglement.center,
+            ball,
+            outer,
+            0.72,
+            4.8 * scale,
+            13.0 * scale,
+        );
         push_entangle_loop(
             instances,
             entanglement.center,
             entanglement.radius,
             inner,
             outer,
+            scale,
         );
     } else if let Some(intersection) = world.spring.intersection {
         push_coil_instances(
@@ -601,20 +1184,36 @@ fn push_spring_instances(instances: &mut Vec<Instance>, world: &World) {
             intersection.point,
             outer,
             0.54,
-            4.2,
-            10.0,
+            4.2 * scale,
+            10.0 * scale,
         );
-        push_coil_instances(instances, intersection.point, ball, outer, 0.68, 4.8, 13.0);
+        push_coil_instances(
+            instances,
+            intersection.point,
+            ball,
+            outer,
+            0.68,
+            4.8 * scale,
+            13.0 * scale,
+        );
         instances.push(Instance {
             center: intersection.point.to_array(),
-            half: [13.0, 13.0],
+            half: [13.0 * scale, 13.0 * scale],
             color: [inner.x, inner.y, inner.z, 0.34 * intersection.strength()],
             softness: 0.9,
             material: 0.0,
             roll: [1.0, 0.0, 0.0, 0.0],
         });
     } else {
-        push_coil_instances(instances, anchor, ball, outer, 0.62, 4.5, 12.0);
+        push_coil_instances(
+            instances,
+            anchor,
+            ball,
+            outer,
+            0.62,
+            4.5 * scale,
+            12.0 * scale,
+        );
     }
 }
 
@@ -661,6 +1260,7 @@ fn push_entangle_loop(
     radius: f32,
     inner: Vec4,
     outer: Vec4,
+    scale: f32,
 ) {
     let loop_radius = radius.clamp(46.0, 96.0);
     for i in 0..28 {
@@ -670,7 +1270,7 @@ fn push_entangle_loop(
         let color = if i % 2 == 0 { inner } else { outer };
         instances.push(Instance {
             center: pos.to_array(),
-            half: [3.8, 3.8],
+            half: [3.8 * scale, 3.8 * scale],
             color: [color.x, color.y, color.z, 0.58],
             softness: 0.72,
             material: 0.0,

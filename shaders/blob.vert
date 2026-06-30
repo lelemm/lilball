@@ -8,7 +8,7 @@ layout(location = 1) in vec2 i_center;    // center in logical pixels
 layout(location = 2) in vec2 i_half;      // half-extent (rx, ry) in pixels
 layout(location = 3) in vec4 i_color;     // rgba, alpha used as intensity
 layout(location = 4) in float i_softness; // 0 = hard edge, 1 = fully soft
-layout(location = 5) in float i_material; // 0 = glow blob, 1 = soccer ball
+layout(location = 5) in float i_material; // 0 = glow blob, 1 = soccer ball, 2 = dust
 layout(location = 6) in vec4 i_roll;      // xy = axis, z = roll angle
 
 layout(push_constant) uniform Push {

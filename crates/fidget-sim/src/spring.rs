@@ -3,6 +3,11 @@ use glam::Vec2;
 use crate::ball::Ball;
 use crate::bounds::Bounds;
 
+pub const DEFAULT_RECALL_MARGIN: f32 = 900.0;
+pub const DEFAULT_SPRING_DAMPING: f32 = 11.0;
+const DEFAULT_INTERSECTION_CAPTURE_RADIUS: f32 = 110.0;
+const DEFAULT_ENTANGLE_CAPTURE_RADIUS: f32 = 72.0;
+
 /// Temporary wrap point created when a fast cursor sweep snags the spring.
 #[derive(Debug, Clone, Copy)]
 pub struct CursorEntanglement {
@@ -49,6 +54,7 @@ pub struct SpringState {
     pub anchor: Vec2,
     pub hook_offset_y: f32,
     pub rest_length: f32,
+    pub length_scale: f32,
     pub stiffness: f32,
     pub damping: f32,
     pub max_force: f32,
@@ -69,32 +75,48 @@ impl SpringState {
             anchor,
             hook_offset_y,
             rest_length: ball_pos.distance(anchor).max(1.0),
+            length_scale: 1.0,
             stiffness: 85.0,
-            damping: 20.0,
+            damping: DEFAULT_SPRING_DAMPING,
             max_force: 18_000.0,
-            recall_margin: 900.0,
+            recall_margin: DEFAULT_RECALL_MARGIN,
             attached: true,
             intersection: None,
             entanglement: None,
-            intersection_capture_radius: 110.0,
-            entangle_capture_radius: 72.0,
+            intersection_capture_radius: DEFAULT_INTERSECTION_CAPTURE_RADIUS,
+            entangle_capture_radius: DEFAULT_ENTANGLE_CAPTURE_RADIUS,
             entangle_min_cursor_speed: 2200.0,
         }
     }
 
+    pub fn set_interaction_scale(&mut self, scale: f32) {
+        let scale = scale.clamp(0.45, 1.25);
+        self.intersection_capture_radius = DEFAULT_INTERSECTION_CAPTURE_RADIUS * scale;
+        self.entangle_capture_radius = DEFAULT_ENTANGLE_CAPTURE_RADIUS * scale;
+    }
+
+    pub fn set_length_scale(&mut self, bounds: Bounds, scale: f32) {
+        self.length_scale = scale.clamp(0.45, 1.25);
+        self.rest_length = self.scaled_rest_length(bounds);
+    }
+
     pub fn set_bounds(&mut self, bounds: Bounds) {
         self.anchor = anchor_for(bounds) + Vec2::Y * self.hook_offset_y;
-        self.rest_length = bounds.center().distance(self.anchor).max(1.0);
+        self.rest_length = self.scaled_rest_length(bounds);
     }
 
     pub fn set_hook_offset_y(&mut self, bounds: Bounds, offset_y: f32) {
         self.hook_offset_y = offset_y.clamp(-600.0, 260.0);
         self.anchor = anchor_for(bounds) + Vec2::Y * self.hook_offset_y;
-        self.rest_length = bounds.center().distance(self.anchor).max(1.0);
+        self.rest_length = self.scaled_rest_length(bounds);
     }
 
     pub fn rest_position(&self) -> Vec2 {
         self.anchor + Vec2::Y * self.rest_length
+    }
+
+    fn scaled_rest_length(&self, bounds: Bounds) -> f32 {
+        (bounds.center().distance(self.anchor) * self.length_scale).max(1.0)
     }
 
     pub fn cut(&mut self) {
@@ -220,14 +242,27 @@ impl SpringState {
     }
 
     pub fn sweep_hits_spring(&self, ball: &Ball, prev_cursor: Vec2, cursor: Vec2) -> bool {
+        self.cut_normal_speed_for_cursor_sweep(ball, prev_cursor, cursor, Vec2::ZERO)
+            .is_some()
+    }
+
+    pub fn cut_normal_speed_for_cursor_sweep(
+        &self,
+        ball: &Ball,
+        prev_cursor: Vec2,
+        cursor: Vec2,
+        cursor_vel: Vec2,
+    ) -> Option<f32> {
         if !self.attached {
-            return false;
+            return None;
         }
-        let spring_hit = segment_distance(prev_cursor, cursor, self.anchor, ball.pos)
-            <= self.entangle_capture_radius;
-        let ball_hit = distance_to_segment(ball.pos, prev_cursor, cursor)
-            <= ball.radius + self.entangle_capture_radius;
-        spring_hit || ball_hit
+        let tangent = self.cut_tangent_for_cursor_sweep(
+            ball,
+            prev_cursor,
+            cursor,
+            self.entangle_capture_radius,
+        )?;
+        Some(normal_speed(cursor_vel, tangent))
     }
 
     pub fn moving_spring_hits_cursor(
@@ -245,6 +280,107 @@ impl SpringState {
             || distance_to_segment(cursor, self.anchor, ball.pos) <= radius
             || distance_to_segment(cursor, prev_ball_pos, ball.pos) <= radius
             || point_in_triangle(cursor, self.anchor, prev_ball_pos, ball.pos)
+    }
+
+    pub fn cut_normal_speed_for_moving_spring(
+        &self,
+        ball: &Ball,
+        prev_ball_pos: Vec2,
+        cursor: Vec2,
+        relative_vel: Vec2,
+    ) -> Option<f32> {
+        if !self.moving_cuttable_spring_hits_cursor(ball, prev_ball_pos, cursor) {
+            return None;
+        }
+        self.path_tangent_near_cuttable_point(ball, cursor)
+            .map(|tangent| normal_speed(relative_vel, tangent))
+    }
+
+    fn cut_tangent_for_cursor_sweep(
+        &self,
+        ball: &Ball,
+        prev_cursor: Vec2,
+        cursor: Vec2,
+        radius: f32,
+    ) -> Option<Vec2> {
+        let support = self.support_point();
+        let mut best = None;
+        if let Some(support) = support {
+            consider_sweep_segment(&mut best, prev_cursor, cursor, self.anchor, support, radius);
+            if let Some(cut_end) = cuttable_ball_end(support, ball.pos, ball.radius, radius) {
+                consider_sweep_segment(&mut best, prev_cursor, cursor, support, cut_end, radius);
+            }
+        } else {
+            if let Some(cut_end) = cuttable_ball_end(self.anchor, ball.pos, ball.radius, radius) {
+                consider_sweep_segment(
+                    &mut best,
+                    prev_cursor,
+                    cursor,
+                    self.anchor,
+                    cut_end,
+                    radius,
+                );
+            }
+        }
+
+        best.map(|(_, tangent)| tangent)
+    }
+
+    fn path_tangent_near_cuttable_point(&self, ball: &Ball, point: Vec2) -> Option<Vec2> {
+        let support = self.support_point();
+        let mut best = None;
+        if let Some(support) = support {
+            consider_point_segment(&mut best, point, self.anchor, support);
+            if let Some(cut_end) =
+                cuttable_ball_end(support, ball.pos, ball.radius, self.entangle_capture_radius)
+            {
+                consider_point_segment(&mut best, point, support, cut_end);
+            }
+        } else {
+            if let Some(cut_end) = cuttable_ball_end(
+                self.anchor,
+                ball.pos,
+                ball.radius,
+                self.entangle_capture_radius,
+            ) {
+                consider_point_segment(&mut best, point, self.anchor, cut_end);
+            }
+        }
+        best.map(|(_, tangent)| tangent)
+    }
+
+    fn moving_cuttable_spring_hits_cursor(
+        &self,
+        ball: &Ball,
+        prev_ball_pos: Vec2,
+        cursor: Vec2,
+    ) -> bool {
+        if !self.attached {
+            return false;
+        }
+
+        let radius = self.entangle_capture_radius;
+        let Some(prev_end) = cuttable_ball_end(self.anchor, prev_ball_pos, ball.radius, radius)
+        else {
+            return false;
+        };
+        let Some(current_end) = cuttable_ball_end(self.anchor, ball.pos, ball.radius, radius)
+        else {
+            return false;
+        };
+
+        distance_to_segment(cursor, self.anchor, prev_end) <= radius
+            || distance_to_segment(cursor, self.anchor, current_end) <= radius
+            || distance_to_segment(cursor, prev_end, current_end) <= radius
+            || point_in_triangle(cursor, self.anchor, prev_end, current_end)
+    }
+
+    fn support_point(&self) -> Option<Vec2> {
+        if let Some(entanglement) = self.entanglement {
+            Some(entanglement.target())
+        } else {
+            self.intersection.map(|intersection| intersection.point)
+        }
     }
 
     pub fn update_intersection_sweep(
@@ -434,6 +570,57 @@ fn point_in_triangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
     let bc = (c - b).perp_dot(p - b);
     let ca = (a - c).perp_dot(p - c);
     (ab >= 0.0 && bc >= 0.0 && ca >= 0.0) || (ab <= 0.0 && bc <= 0.0 && ca <= 0.0)
+}
+
+fn consider_sweep_segment(
+    best: &mut Option<(f32, Vec2)>,
+    sweep_start: Vec2,
+    sweep_end: Vec2,
+    band_start: Vec2,
+    band_end: Vec2,
+    radius: f32,
+) {
+    let distance = segment_distance(sweep_start, sweep_end, band_start, band_end);
+    if distance <= radius {
+        consider_candidate(best, distance, band_end - band_start);
+    }
+}
+
+fn consider_point_segment(best: &mut Option<(f32, Vec2)>, point: Vec2, start: Vec2, end: Vec2) {
+    consider_candidate(best, distance_to_segment(point, start, end), end - start);
+}
+
+fn consider_candidate(best: &mut Option<(f32, Vec2)>, distance: f32, tangent: Vec2) {
+    if tangent.length_squared() <= 1e-4 {
+        return;
+    }
+    if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+        *best = Some((distance, tangent));
+    }
+}
+
+fn cuttable_ball_end(
+    start: Vec2,
+    ball_pos: Vec2,
+    ball_radius: f32,
+    hit_radius: f32,
+) -> Option<Vec2> {
+    let to_ball = ball_pos - start;
+    let len = to_ball.length();
+    let trim_from_ball = ball_radius * 1.7 + hit_radius;
+    if len <= trim_from_ball + 1.0 {
+        return None;
+    }
+    Some(start + to_ball / len * (len - trim_from_ball))
+}
+
+fn normal_speed(velocity: Vec2, tangent: Vec2) -> f32 {
+    let tangent = tangent.normalize_or_zero();
+    if tangent.length_squared() <= 1e-4 {
+        velocity.length()
+    } else {
+        velocity.perp_dot(tangent).abs()
+    }
 }
 
 fn clamp_force(force: Vec2, max: f32) -> Vec2 {

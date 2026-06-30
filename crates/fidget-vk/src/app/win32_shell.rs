@@ -5,7 +5,7 @@ use std::num::NonZeroIsize;
 
 use anyhow::{Context, Result, anyhow};
 use egui::{Event, Modifiers, PointerButton, RawInput};
-use fidget_sim::{BottomEdge, Bounds};
+use fidget_sim::Bounds;
 use glam::Vec2;
 use image::imageops::FilterType;
 use raw_window_handle::{
@@ -45,7 +45,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, PCWSTR};
 
 use crate::app::core::{AppAction, Core};
-use crate::config::Settings;
+use crate::config::{Settings, ToySize};
 use crate::renderer::{EguiDrawData, Renderer};
 
 const CLASS_NAME: &str = "FidgetVkOverlayWindow";
@@ -77,7 +77,12 @@ const MENU_NUDGE: usize = 205;
 const MENU_QUIT: usize = 206;
 const MENU_TOGGLE_RUBBER_BAND: usize = 207;
 const MENU_TOGGLE_BOTTOM_BOUNCE: usize = 208;
+const MENU_TOGGLE_SINGLE_MONITOR: usize = 209;
+const MENU_SIZE_SMALL: usize = 210;
+const MENU_SIZE_MEDIUM: usize = 211;
+const MENU_SIZE_LARGE: usize = 212;
 const SOCCER_ICON_PNG: &[u8] = include_bytes!("../../../../assets/soccer_ball_material.png");
+const MONITORINFOF_PRIMARY: u32 = 1;
 
 pub(super) fn run() -> Result<()> {
     let instance = module_instance()?;
@@ -203,8 +208,10 @@ impl Win32App {
     fn init_renderer(&mut self) -> Result<()> {
         self.core
             .resize(self.geometry.width as u32, self.geometry.height as u32);
-        self.core
-            .set_bottom_edges(self.geometry.bottom_edges.iter().copied());
+        self.core.set_monitor_layout(
+            self.geometry.monitor_bounds.iter().copied(),
+            self.geometry.primary_monitor,
+        );
         let display = RawDisplayHandle::Windows(WindowsDisplayHandle::new());
         let hwnd = NonZeroIsize::new(self.hwnd.0 as isize).ok_or_else(|| anyhow!("null HWND"))?;
         let hinstance = NonZeroIsize::new(self.instance.0 as isize);
@@ -280,8 +287,10 @@ impl Win32App {
         self.geometry.height = height.max(1);
         self.core
             .resize(self.geometry.width as u32, self.geometry.height as u32);
-        self.core
-            .set_bottom_edges(self.geometry.bottom_edges.iter().copied());
+        self.core.set_monitor_layout(
+            self.geometry.monitor_bounds.iter().copied(),
+            self.geometry.primary_monitor,
+        );
         self.update_egui_screen_rect();
         if let Some(renderer) = self.renderer.as_mut() {
             if let Err(e) =
@@ -564,7 +573,7 @@ impl Win32App {
         };
         unsafe {
             append_checked_menu(menu, MENU_TOGGLE_HUD, "Show HUD", self.core.hud_visible());
-            append_menu(menu, MENU_RESET, "Reset ball");
+            append_menu(menu, MENU_RESET, "Spawn ball");
             append_checked_menu(
                 menu,
                 MENU_TOGGLE_SPRING,
@@ -579,6 +588,24 @@ impl Win32App {
             );
             append_checked_menu(
                 menu,
+                MENU_SIZE_SMALL,
+                "Ball + string: S",
+                self.core.toy_size() == ToySize::Small,
+            );
+            append_checked_menu(
+                menu,
+                MENU_SIZE_MEDIUM,
+                "Ball + string: M",
+                self.core.toy_size() == ToySize::Medium,
+            );
+            append_checked_menu(
+                menu,
+                MENU_SIZE_LARGE,
+                "Ball + string: L",
+                self.core.toy_size() == ToySize::Large,
+            );
+            append_checked_menu(
+                menu,
                 MENU_TOGGLE_GRAVITY,
                 "Gravity enabled",
                 self.core.gravity_enabled(),
@@ -588,6 +615,12 @@ impl Win32App {
                 MENU_TOGGLE_BOTTOM_BOUNCE,
                 "Bounce bottom edge",
                 self.core.bottom_bounce_enabled(),
+            );
+            append_checked_menu(
+                menu,
+                MENU_TOGGLE_SINGLE_MONITOR,
+                "Single monitor bounds",
+                self.core.single_monitor_bounds_enabled(),
             );
             append_menu(menu, MENU_NUDGE, "Fling ball");
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -614,6 +647,18 @@ impl Win32App {
             MENU_TOGGLE_RUBBER_BAND => self.core.apply_action(AppAction::ToggleSpringVisual),
             MENU_TOGGLE_GRAVITY => self.core.apply_action(AppAction::ToggleGravity),
             MENU_TOGGLE_BOTTOM_BOUNCE => self.core.apply_action(AppAction::ToggleBottomBounce),
+            MENU_TOGGLE_SINGLE_MONITOR => {
+                self.core.apply_action(AppAction::ToggleSingleMonitorBounds)
+            }
+            MENU_SIZE_SMALL => self
+                .core
+                .apply_action(AppAction::SetToySize(ToySize::Small)),
+            MENU_SIZE_MEDIUM => self
+                .core
+                .apply_action(AppAction::SetToySize(ToySize::Medium)),
+            MENU_SIZE_LARGE => self
+                .core
+                .apply_action(AppAction::SetToySize(ToySize::Large)),
             MENU_NUDGE => self.core.apply_action(AppAction::Nudge),
             MENU_QUIT => self.quit(),
             _ => {}
@@ -688,7 +733,8 @@ struct OverlayGeometry {
     y: i32,
     width: i32,
     height: i32,
-    bottom_edges: Vec<BottomEdge>,
+    monitor_bounds: Vec<Bounds>,
+    primary_monitor: usize,
 }
 
 impl OverlayGeometry {
@@ -698,31 +744,41 @@ impl OverlayGeometry {
             let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
             let width = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1);
             let height = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
-            let monitor_bounds = monitor_bounds(x, y);
-            let fallback = Bounds::new(0.0, 0.0, width as f32, height as f32);
-            let bottom_edges = BottomEdge::exposed_from_bounds(&monitor_bounds, fallback);
+            let (monitor_bounds, primary_monitor) = collect_monitor_bounds(x, y);
+            let monitor_bounds = if monitor_bounds.is_empty() {
+                vec![Bounds::new(0.0, 0.0, width as f32, height as f32)]
+            } else {
+                monitor_bounds
+            };
+            let primary_monitor = primary_monitor.min(monitor_bounds.len().saturating_sub(1));
             Self {
                 x,
                 y,
                 width,
                 height,
-                bottom_edges,
+                monitor_bounds,
+                primary_monitor,
             }
         }
     }
 }
 
+struct MonitorEntry {
+    bounds: Bounds,
+    primary: bool,
+}
+
 struct MonitorEdgeCollector {
     origin_x: i32,
     origin_y: i32,
-    bounds: Vec<Bounds>,
+    entries: Vec<MonitorEntry>,
 }
 
-fn monitor_bounds(origin_x: i32, origin_y: i32) -> Vec<Bounds> {
+fn collect_monitor_bounds(origin_x: i32, origin_y: i32) -> (Vec<Bounds>, usize) {
     let mut collector = MonitorEdgeCollector {
         origin_x,
         origin_y,
-        bounds: Vec::new(),
+        entries: Vec::new(),
     };
     let ok = unsafe {
         EnumDisplayMonitors(
@@ -733,9 +789,21 @@ fn monitor_bounds(origin_x: i32, origin_y: i32) -> Vec<Bounds> {
         )
     };
     if !ok.as_bool() {
-        log::warn!("failed to enumerate display monitors for bottom bounce edges");
+        log::warn!("failed to enumerate display monitors");
     }
-    collector.bounds
+    let primary_monitor = collector
+        .entries
+        .iter()
+        .position(|entry| entry.primary)
+        .unwrap_or(0);
+    (
+        collector
+            .entries
+            .into_iter()
+            .map(|entry| entry.bounds)
+            .collect(),
+        primary_monitor,
+    )
 }
 
 unsafe extern "system" fn collect_monitor_edge(
@@ -757,12 +825,15 @@ unsafe extern "system" fn collect_monitor_edge(
         return BOOL(1);
     };
 
-    collector.bounds.push(Bounds::new(
-        (monitor_rect.left - collector.origin_x) as f32,
-        (monitor_rect.top - collector.origin_y) as f32,
-        (monitor_rect.right - collector.origin_x) as f32,
-        (monitor_rect.bottom - collector.origin_y) as f32,
-    ));
+    collector.entries.push(MonitorEntry {
+        bounds: Bounds::new(
+            (monitor_rect.left - collector.origin_x) as f32,
+            (monitor_rect.top - collector.origin_y) as f32,
+            (monitor_rect.right - collector.origin_x) as f32,
+            (monitor_rect.bottom - collector.origin_y) as f32,
+        ),
+        primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+    });
     BOOL(1)
 }
 
@@ -831,10 +902,9 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         }
         WM_TRAY => {
             let tray_msg = lparam.0 as u32;
-            if tray_msg == WM_RBUTTONUP
-                || tray_msg == WM_CONTEXTMENU
-                || tray_msg == WM_LBUTTONDBLCLK
-            {
+            if tray_msg == WM_LBUTTONUP || tray_msg == WM_LBUTTONDBLCLK {
+                app.core.apply_action(AppAction::Reset);
+            } else if tray_msg == WM_RBUTTONUP || tray_msg == WM_CONTEXTMENU {
                 app.show_tray_menu();
             }
             LRESULT(0)

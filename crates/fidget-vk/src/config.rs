@@ -30,6 +30,49 @@ impl SpringVisual {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToySize {
+    Small,
+    Medium,
+    #[default]
+    Large,
+}
+
+impl ToySize {
+    pub fn ball_radius(self) -> f32 {
+        match self {
+            Self::Small => 24.0,
+            Self::Medium => 34.0,
+            Self::Large => 42.0,
+        }
+    }
+
+    pub fn interaction_scale(self) -> f32 {
+        match self {
+            Self::Small => 0.62,
+            Self::Medium => 0.82,
+            Self::Large => 1.0,
+        }
+    }
+
+    pub fn length_scale(self) -> f32 {
+        match self {
+            Self::Small => 0.55,
+            Self::Medium => 0.78,
+            Self::Large => 1.0,
+        }
+    }
+
+    pub fn band_scale(self) -> f32 {
+        match self {
+            Self::Small => 0.34,
+            Self::Medium => 0.72,
+            Self::Large => 1.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BallSettings {
@@ -61,6 +104,7 @@ pub struct VisualSettings {
     pub trail: bool,
     pub max_particles: usize,
     pub spring_visual: SpringVisual,
+    pub rubber_band_thickness: f32,
 }
 
 impl Default for VisualSettings {
@@ -70,6 +114,7 @@ impl Default for VisualSettings {
             trail: true,
             max_particles: 2000,
             spring_visual: SpringVisual::Spring,
+            rubber_band_thickness: 0.72,
         }
     }
 }
@@ -83,6 +128,8 @@ pub struct SimSettings {
     /// Cursor speed in px/s required to cut the spring by sweeping across it.
     pub cut_spring_cursor_speed: f32,
     pub bounce_bottom_edge: bool,
+    pub single_monitor_bounds: bool,
+    pub toy_size: ToySize,
 }
 
 impl Default for SimSettings {
@@ -92,6 +139,8 @@ impl Default for SimSettings {
             max_speed: 4500.0,
             cut_spring_cursor_speed: 3600.0,
             bounce_bottom_edge: false,
+            single_monitor_bounds: false,
+            toy_size: ToySize::Large,
         }
     }
 }
@@ -138,7 +187,11 @@ impl Settings {
         WorldConfig {
             gravity: Vec2::new(0.0, self.sim.gravity),
             max_speed: self.sim.max_speed,
+            ball_radius: self.sim.toy_size.ball_radius(),
+            spring_interaction_scale: self.sim.toy_size.interaction_scale(),
+            spring_length_scale: self.sim.toy_size.length_scale(),
             cut_spring_cursor_speed: self.sim.cut_spring_cursor_speed,
+            cursor_ball_radius: 18.0 * self.sim.toy_size.interaction_scale(),
             bounce_bottom_edge: self.sim.bounce_bottom_edge,
             max_particles: self.visuals.max_particles,
             trail_enabled: self.visuals.trail,

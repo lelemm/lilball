@@ -20,6 +20,30 @@ fn ball_starts_centered() {
 }
 
 #[test]
+fn world_uses_configured_ball_and_spring_size() {
+    let bounds = Bounds::new(0.0, 0.0, 1000.0, 600.0);
+    let large = World::new(WorldConfig::default(), bounds);
+    let cfg = WorldConfig {
+        ball_radius: 24.0,
+        spring_interaction_scale: 0.62,
+        spring_length_scale: 0.55,
+        ..WorldConfig::default()
+    };
+    let world = World::new(cfg, bounds);
+
+    assert_relative_eq!(world.ball.radius, 24.0);
+    assert!(world.spring.intersection_capture_radius < 90.0);
+    assert!(world.spring.entangle_capture_radius < 60.0);
+    assert!(world.spring.rest_length < large.spring.rest_length * 0.7);
+    assert!(
+        world.ball.pos.y < large.ball.pos.y,
+        "shorter spring should hang higher, small={:?}, large={:?}",
+        world.ball.pos,
+        large.ball.pos
+    );
+}
+
+#[test]
 fn ball_bounces_off_right_wall_and_reverses() {
     let mut world = no_gravity_world();
     world.ball.vel = Vec2::new(2000.0, 0.0);
@@ -93,6 +117,29 @@ fn attached_spring_pulls_ball_toward_rest_position() {
 }
 
 #[test]
+fn stretched_attached_spring_rebounds_past_rest() {
+    let mut world = no_gravity_world();
+    let rest = world.spring.rest_position();
+    world.ball.pos = rest + Vec2::new(0.0, 220.0);
+    world.ball.vel = Vec2::ZERO;
+
+    let mut overshot = false;
+    for _ in 0..180 {
+        world.advance(FIXED_DT);
+        if world.ball.pos.y < rest.y - 8.0 {
+            overshot = true;
+            break;
+        }
+    }
+
+    assert!(
+        overshot,
+        "stretched spring should keep enough energy to rebound past rest, pos={:?}, rest={:?}",
+        world.ball.pos, rest
+    );
+}
+
+#[test]
 fn hook_defaults_above_screen_top() {
     let world = no_gravity_world();
     assert!(
@@ -136,6 +183,21 @@ fn cut_spring_lets_ball_fall_through_bottom() {
         "cut spring should disable the bottom wall, pos={:?}",
         world.ball.pos
     );
+}
+
+#[test]
+fn zero_recall_margin_hides_as_soon_as_ball_leaves_bottom() {
+    let mut world = World::new(WorldConfig::default(), Bounds::new(0.0, 0.0, 1000.0, 600.0));
+    let r = world.ball.radius;
+    world.cut_spring();
+    world.set_recall_margin(0.0);
+    world.ball.pos = Vec2::new(500.0, world.bounds.bottom + r + 2.0);
+    world.ball.vel = Vec2::new(0.0, 900.0);
+
+    world.advance(FIXED_DT);
+
+    assert!(!world.ball_visible());
+    assert!(!world.spring_attached());
 }
 
 #[test]
@@ -288,7 +350,7 @@ fn exposed_bottom_edges_keep_uncovered_parts_of_upper_monitor() {
 }
 
 #[test]
-fn fallen_ball_recalls_to_spring() {
+fn fallen_ball_hides_in_pit_until_spawned() {
     let mut world = World::new(WorldConfig::default(), Bounds::new(0.0, 0.0, 1000.0, 600.0));
     world.cut_spring();
     world.ball.pos = Vec2::new(
@@ -299,17 +361,15 @@ fn fallen_ball_recalls_to_spring() {
 
     world.advance(FIXED_DT);
 
+    assert!(!world.ball_visible());
+    assert!(!world.spring_attached());
+
+    world.spawn_attached_at(Vec2::new(320.0, 220.0));
+
+    assert!(world.ball_visible());
     assert!(world.spring_attached());
-    assert_relative_eq!(
-        world.ball.pos.x,
-        world.spring.rest_position().x,
-        epsilon = 0.01
-    );
-    assert_relative_eq!(
-        world.ball.pos.y,
-        world.spring.rest_position().y,
-        epsilon = 0.01
-    );
+    assert_relative_eq!(world.ball.pos.x, 320.0, epsilon = 0.01);
+    assert_relative_eq!(world.ball.pos.y, 220.0, epsilon = 0.01);
     assert_relative_eq!(world.ball.vel.length(), 0.0, epsilon = 0.01);
 }
 
@@ -741,6 +801,51 @@ fn very_fast_cursor_sweep_cuts_spring() {
 }
 
 #[test]
+fn very_fast_parallel_cursor_sweep_does_not_cut_spring() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 3000.0;
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid + Vec2::new(0.0, -180.0), 0.0);
+    world.move_cursor(spring_mid + Vec2::new(0.0, 180.0), 0.04);
+
+    assert!(
+        world.spring_attached(),
+        "fast tangent motion along the spring should not cut it"
+    );
+}
+
+#[test]
+fn very_fast_cursor_sweep_through_ball_does_not_cut_spring() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 3000.0;
+    let ball = world.ball.pos;
+
+    world.move_cursor(ball + Vec2::new(-180.0, 0.0), 0.0);
+    world.move_cursor(ball + Vec2::new(180.0, 0.0), 0.04);
+
+    assert!(
+        world.spring_attached(),
+        "swiping through the ball should not cut the protected ball-side band"
+    );
+}
+
+#[test]
+fn very_fast_cursor_sweep_near_ball_end_does_not_cut_spring() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 3000.0;
+    let near_ball = world.ball.pos + (world.spring.anchor - world.ball.pos).normalize() * 64.0;
+
+    world.move_cursor(near_ball + Vec2::new(-180.0, 0.0), 0.0);
+    world.move_cursor(near_ball + Vec2::new(180.0, 0.0), 0.04);
+
+    assert!(
+        world.spring_attached(),
+        "the band segment near the ball should be uncuttable"
+    );
+}
+
+#[test]
 fn very_fast_right_click_sweep_does_not_cut_spring() {
     let mut world = no_gravity_world();
     world.config.cut_spring_cursor_speed = 3000.0;
@@ -791,6 +896,36 @@ fn stationary_cursor_does_not_cut_slow_moving_spring() {
     world.advance(FIXED_DT);
 
     assert!(world.spring_attached());
+}
+
+#[test]
+fn stationary_cursor_does_not_cut_fast_tangent_spring_motion() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 3000.0;
+    let spring_mid = (world.spring.anchor + world.ball.pos) * 0.5;
+
+    world.move_cursor(spring_mid, 0.0);
+    world.ball.vel = Vec2::new(0.0, 3600.0);
+    world.advance(FIXED_DT);
+
+    assert!(
+        world.spring_attached(),
+        "fast motion along the spring tangent should not cut it"
+    );
+}
+
+#[test]
+fn stationary_cursor_does_not_cut_fast_ball_end_motion() {
+    let mut world = no_gravity_world();
+    world.config.cut_spring_cursor_speed = 3000.0;
+    world.move_cursor(world.ball.pos, 0.0);
+    world.ball.vel = Vec2::new(3600.0, 0.0);
+    world.advance(FIXED_DT);
+
+    assert!(
+        world.spring_attached(),
+        "stationary cursor inside the ball should not cut the protected ball-side band"
+    );
 }
 
 #[test]

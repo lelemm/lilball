@@ -1,7 +1,7 @@
 //! Current winit-based overlay shell used by Linux and preview builds.
 
 use anyhow::Result;
-use fidget_sim::{BottomEdge, Bounds};
+use fidget_sim::Bounds;
 use glam::Vec2;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
@@ -14,7 +14,7 @@ use winit::platform::x11::{WindowAttributesExtX11, WindowType};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::app::core::{AppAction, Core};
-use crate::config::Settings;
+use crate::config::{Settings, ToySize};
 use crate::renderer::{EguiDrawData, Renderer};
 
 pub(super) struct WinitApp {
@@ -24,14 +24,16 @@ pub(super) struct WinitApp {
     renderer: Option<Renderer>,
     window: Option<Window>,
     egui_state: Option<egui_winit::State>,
-    bottom_edges: Vec<BottomEdge>,
+    monitor_bounds: Vec<Bounds>,
+    primary_monitor: usize,
 }
 
 #[derive(Debug, Clone)]
 struct OverlayGeometry {
     position: PhysicalPosition<i32>,
     size: PhysicalSize<u32>,
-    bottom_edges: Vec<BottomEdge>,
+    monitor_bounds: Vec<Bounds>,
+    primary_monitor: usize,
 }
 
 impl WinitApp {
@@ -41,7 +43,8 @@ impl WinitApp {
             renderer: None,
             window: None,
             egui_state: None,
-            bottom_edges: Vec::new(),
+            monitor_bounds: Vec::new(),
+            primary_monitor: 0,
         }
     }
 
@@ -100,8 +103,10 @@ impl WinitApp {
                         event_loop.exit();
                     }
                     self.core.resize(size.width, size.height);
-                    self.core
-                        .set_bottom_edges(self.bottom_edges.iter().copied());
+                    self.core.set_monitor_layout(
+                        self.monitor_bounds.iter().copied(),
+                        self.primary_monitor,
+                    );
                 }
             }
             Err(e) => {
@@ -139,7 +144,8 @@ impl ApplicationHandler for WinitApp {
         };
         window.set_outer_position(overlay.position);
         let _ = window.request_inner_size(overlay.size);
-        self.bottom_edges = overlay.bottom_edges.clone();
+        self.monitor_bounds = overlay.monitor_bounds.clone();
+        self.primary_monitor = overlay.primary_monitor;
 
         let size = window.inner_size();
         let display = window.display_handle().unwrap().as_raw();
@@ -157,7 +163,7 @@ impl ApplicationHandler for WinitApp {
             Ok(renderer) => {
                 self.core.resize(size.width, size.height);
                 self.core
-                    .set_bottom_edges(self.bottom_edges.iter().copied());
+                    .set_monitor_layout(self.monitor_bounds.iter().copied(), self.primary_monitor);
                 self.renderer = Some(renderer);
                 self.window = Some(window);
                 self.egui_state = Some(egui_state);
@@ -207,7 +213,7 @@ impl ApplicationHandler for WinitApp {
                 }
                 self.core.resize(size.width, size.height);
                 self.core
-                    .set_bottom_edges(self.bottom_edges.iter().copied());
+                    .set_monitor_layout(self.monitor_bounds.iter().copied(), self.primary_monitor);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if egui_consumed {
@@ -262,6 +268,21 @@ impl ApplicationHandler for WinitApp {
                         PhysicalKey::Code(KeyCode::KeyB) => {
                             self.core.apply_action(AppAction::ToggleBottomBounce);
                         }
+                        PhysicalKey::Code(KeyCode::KeyM) => {
+                            self.core.apply_action(AppAction::ToggleSingleMonitorBounds);
+                        }
+                        PhysicalKey::Code(KeyCode::Digit1) => {
+                            self.core
+                                .apply_action(AppAction::SetToySize(ToySize::Small));
+                        }
+                        PhysicalKey::Code(KeyCode::Digit2) => {
+                            self.core
+                                .apply_action(AppAction::SetToySize(ToySize::Medium));
+                        }
+                        PhysicalKey::Code(KeyCode::Digit3) => {
+                            self.core
+                                .apply_action(AppAction::SetToySize(ToySize::Large));
+                        }
                         _ => {}
                     }
                 }
@@ -292,12 +313,14 @@ pub(super) fn run() -> Result<()> {
 }
 
 fn overlay_geometry(event_loop: &ActiveEventLoop) -> OverlayGeometry {
-    let mut monitors = event_loop.available_monitors();
-    let Some(first) = monitors.next() else {
+    let primary_monitor = event_loop.primary_monitor();
+    let monitors: Vec<_> = event_loop.available_monitors().collect();
+    let Some(first) = monitors.first() else {
         return OverlayGeometry {
             position: PhysicalPosition::new(0, 0),
             size: PhysicalSize::new(1280, 720),
-            bottom_edges: vec![BottomEdge::new(0.0, 1280.0, 720.0)],
+            monitor_bounds: vec![Bounds::new(0.0, 0.0, 1280.0, 720.0)],
+            primary_monitor: 0,
         };
     };
 
@@ -309,7 +332,7 @@ fn overlay_geometry(event_loop: &ActiveEventLoop) -> OverlayGeometry {
     let mut right = pos.x + size.width as i32;
     let mut bottom = pos.y + size.height as i32;
 
-    for monitor in monitors {
+    for monitor in monitors.iter().skip(1) {
         let pos = monitor.position();
         let size = monitor.size();
         monitor_rects.push((pos.x, pos.y, size.width, size.height));
@@ -330,17 +353,16 @@ fn overlay_geometry(event_loop: &ActiveEventLoop) -> OverlayGeometry {
             )
         })
         .collect();
-    let overlay_bounds = Bounds::new(
-        0.0,
-        0.0,
-        (right - left).max(1) as f32,
-        (bottom - top).max(1) as f32,
-    );
-    let bottom_edges = BottomEdge::exposed_from_bounds(&monitor_bounds, overlay_bounds);
+    let primary_monitor = primary_monitor
+        .as_ref()
+        .and_then(|primary| monitors.iter().position(|monitor| monitor == primary))
+        .unwrap_or(0)
+        .min(monitor_bounds.len().saturating_sub(1));
 
     OverlayGeometry {
         position: PhysicalPosition::new(left, top),
         size: PhysicalSize::new((right - left).max(1) as u32, (bottom - top).max(1) as u32),
-        bottom_edges,
+        monitor_bounds,
+        primary_monitor,
     }
 }

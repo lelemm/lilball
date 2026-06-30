@@ -20,6 +20,9 @@ pub struct WorldConfig {
     /// Per-second damping applied to particles.
     pub particle_drag: f32,
     pub max_speed: f32,
+    pub ball_radius: f32,
+    pub spring_interaction_scale: f32,
+    pub spring_length_scale: f32,
     pub max_particles: usize,
     pub trail_enabled: bool,
     pub particles_enabled: bool,
@@ -57,6 +60,9 @@ impl Default for WorldConfig {
             air_drag: 0.12,
             particle_drag: 1.2,
             max_speed: 4500.0,
+            ball_radius: 42.0,
+            spring_interaction_scale: 1.0,
+            spring_length_scale: 1.0,
             max_particles: 2000,
             trail_enabled: true,
             particles_enabled: true,
@@ -88,6 +94,7 @@ pub struct World {
     pub particles: ParticleSystem,
     pub interaction: InteractionState,
     pub spring: SpringState,
+    pub ball_visible: bool,
 
     accumulator: f32,
     cursor: Vec2,
@@ -100,8 +107,10 @@ pub struct World {
 
 impl World {
     pub fn new(config: WorldConfig, bounds: Bounds) -> Self {
-        let ball = Ball::new(bounds.center(), 42.0);
-        let spring = SpringState::new(bounds, ball.pos);
+        let mut spring = SpringState::new(bounds, bounds.center());
+        spring.set_interaction_scale(config.spring_interaction_scale);
+        spring.set_length_scale(bounds, config.spring_length_scale);
+        let ball = Ball::new(spring.rest_position(), config.ball_radius.clamp(12.0, 96.0));
         let particles = ParticleSystem::new(config.max_particles);
         let trail = Trail::new(64, 0.45);
         Self {
@@ -116,6 +125,7 @@ impl World {
             particles,
             interaction: InteractionState::default(),
             spring,
+            ball_visible: true,
             accumulator: 0.0,
             mote_accum: 0.0,
             detached_cursor_interaction_active: false,
@@ -164,6 +174,9 @@ impl World {
     /// Cut the anchor spring so gravity can pull the ball out of the bottom of
     /// the play area.
     pub fn cut_spring(&mut self) {
+        if !self.ball_visible {
+            return;
+        }
         let cut_impulse = self.spring.cut_impulse();
         self.spring.cut();
         self.ball.vel += cut_impulse;
@@ -176,7 +189,9 @@ impl World {
     }
 
     pub fn toggle_spring(&mut self) {
-        if self.spring.attached {
+        if !self.ball_visible {
+            self.recall_to_spring();
+        } else if self.spring.attached {
             self.cut_spring();
         } else {
             self.attach_spring();
@@ -184,16 +199,90 @@ impl World {
     }
 
     pub fn spring_attached(&self) -> bool {
-        self.spring.attached
+        self.ball_visible && self.spring.attached
+    }
+
+    pub fn ball_visible(&self) -> bool {
+        self.ball_visible
     }
 
     fn recall_to_spring(&mut self) {
         let r = self.ball.radius;
         self.spring.attach();
         self.ball = Ball::new(self.spring.rest_position(), r);
+        self.ball_visible = true;
         self.cursor_vel = Vec2::ZERO;
         self.detached_cursor_interaction_active = false;
         self.trail.clear();
+    }
+
+    pub fn spawn_attached_at(&mut self, pos: Vec2) {
+        let r = self.ball.radius;
+        let pos = self.safe_ball_pos(pos, r);
+        self.spring.attach();
+        self.spring
+            .set_length_scale(self.bounds, self.config.spring_length_scale);
+        self.ball = Ball::new(pos, r);
+        self.ball_visible = true;
+        self.cursor = pos;
+        self.cursor_vel = Vec2::ZERO;
+        self.cursor_time = None;
+        self.detached_cursor_interaction_active = false;
+        self.trail.clear();
+        self.particles.clear();
+    }
+
+    pub fn set_size(
+        &mut self,
+        ball_radius: f32,
+        spring_interaction_scale: f32,
+        spring_length_scale: f32,
+    ) {
+        let radius = ball_radius.clamp(12.0, 96.0);
+        self.config.ball_radius = radius;
+        self.config.spring_interaction_scale = spring_interaction_scale.clamp(0.45, 1.25);
+        self.config.spring_length_scale = spring_length_scale.clamp(0.45, 1.25);
+        self.spring
+            .set_interaction_scale(self.config.spring_interaction_scale);
+        self.spring
+            .set_length_scale(self.bounds, self.config.spring_length_scale);
+        self.ball.radius = radius;
+        if self.ball_visible {
+            self.ball.pos = self.safe_ball_pos(self.ball.pos, radius);
+        }
+        self.ball.wake();
+    }
+
+    fn despawn_to_pit(&mut self) {
+        self.spring.cut();
+        self.spring.clear_cursor_interaction();
+        self.ball.grabbed = false;
+        self.ball.vel = Vec2::ZERO;
+        self.ball.spin = 0.0;
+        self.ball.asleep = true;
+        self.ball_visible = false;
+        self.detached_cursor_interaction_active = false;
+        self.mote_accum = 0.0;
+        self.trail.clear();
+    }
+
+    fn safe_ball_pos(&self, pos: Vec2, radius: f32) -> Vec2 {
+        let x_min = self.bounds.left + radius;
+        let x_max = self.bounds.right - radius;
+        let y_min = self.bounds.top + radius;
+        let y_max = self.bounds.bottom - radius;
+        Vec2::new(
+            if x_min <= x_max {
+                pos.x.clamp(x_min, x_max)
+            } else {
+                self.bounds.center().x
+            },
+            if y_min <= y_max {
+                pos.y.clamp(y_min, y_max)
+            } else {
+                self.bounds.center().y
+            },
+        )
     }
 
     pub fn toggle_gravity(&mut self) {
@@ -221,6 +310,10 @@ impl World {
     pub fn set_bottom_bounce_enabled(&mut self, enabled: bool) {
         self.config.bounce_bottom_edge = enabled;
         self.ball.wake();
+    }
+
+    pub fn set_recall_margin(&mut self, margin: f32) {
+        self.spring.recall_margin = margin.clamp(0.0, 5000.0);
     }
 
     pub fn spring_stiffness(&self) -> f32 {
@@ -256,6 +349,9 @@ impl World {
     pub fn grab(&mut self, cursor: Vec2, now: f32) -> bool {
         self.update_cursor_sample(cursor, now);
         self.cursor = cursor;
+        if !self.ball_visible {
+            return false;
+        }
         if InteractionState::hit_test(&self.ball, cursor) {
             self.spring.entanglement = None;
             self.interaction.begin_grab(&mut self.ball, cursor, now);
@@ -273,6 +369,9 @@ impl World {
     pub fn move_cursor(&mut self, cursor: Vec2, now: f32) {
         let prev_cursor = self.cursor;
         self.update_cursor_sample(cursor, now);
+        if !self.ball_visible {
+            return;
+        }
         if !self.ball.grabbed && self.should_cut_spring_from_cursor(prev_cursor, cursor) {
             self.cut_spring();
             return;
@@ -285,6 +384,9 @@ impl World {
     pub fn interact_spring(&mut self, cursor: Vec2, now: f32) {
         let prev_cursor = self.cursor;
         self.update_cursor_sample(cursor, now);
+        if !self.ball_visible {
+            return;
+        }
         if self.ball.grabbed {
             self.interaction.update_cursor(cursor, now);
             return;
@@ -324,6 +426,10 @@ impl World {
 
     pub fn stop_spring_interaction(&mut self) {
         self.detached_cursor_interaction_active = false;
+        if !self.ball_visible {
+            self.spring.clear_cursor_interaction();
+            return;
+        }
         if !self.spring.release_cursor_support(&self.ball) {
             self.spring.clear_cursor_interaction();
         }
@@ -331,7 +437,7 @@ impl World {
     }
 
     pub fn release(&mut self, now: f32) {
-        if self.ball.grabbed {
+        if self.ball_visible && self.ball.grabbed {
             self.interaction.release(&mut self.ball, now);
             if self.config.particles_enabled {
                 self.particles.emit_burst(
@@ -344,7 +450,7 @@ impl World {
     }
 
     pub fn is_grabbed(&self) -> bool {
-        self.ball.grabbed
+        self.ball_visible && self.ball.grabbed
     }
 
     fn update_cursor_sample(&mut self, cursor: Vec2, now: f32) {
@@ -359,11 +465,9 @@ impl World {
     }
 
     fn should_cut_spring_from_cursor(&self, prev_cursor: Vec2, cursor: Vec2) -> bool {
-        self.spring.attached
-            && self.cursor_vel.length() >= self.config.cut_spring_cursor_speed
-            && self
-                .spring
-                .sweep_hits_spring(&self.ball, prev_cursor, cursor)
+        self.spring
+            .cut_normal_speed_for_cursor_sweep(&self.ball, prev_cursor, cursor, self.cursor_vel)
+            .is_some_and(|speed| speed >= self.config.cut_spring_cursor_speed)
     }
 
     fn bat_detached_ball_with_cursor(&mut self, prev_cursor: Vec2, cursor: Vec2) -> bool {
@@ -478,6 +582,9 @@ impl World {
     }
 
     fn step(&mut self, dt: f32) {
+        if !self.ball_visible {
+            return;
+        }
         let prev_ball_pos = self.ball.pos;
 
         if self.ball.grabbed {
@@ -566,7 +673,7 @@ impl World {
         }
 
         if self.spring.should_recall(&self.ball, self.bounds) {
-            self.recall_to_spring();
+            self.despawn_to_pit();
         }
 
         // Sleep handling: stop integrating when at rest with no interaction.
@@ -603,25 +710,32 @@ impl World {
     }
 
     fn should_cut_spring_from_ball_motion(&self, prev_ball_pos: Vec2) -> bool {
+        let relative_vel = self.ball.vel - self.cursor_vel;
         self.spring.attached
             && self.cursor_time.is_some()
             && self.spring.intersection.is_none()
             && self.spring.entanglement.is_none()
-            && (self.ball.vel - self.cursor_vel).length() >= self.config.cut_spring_cursor_speed
             && self
                 .spring
-                .moving_spring_hits_cursor(&self.ball, prev_ball_pos, self.cursor)
+                .cut_normal_speed_for_moving_spring(
+                    &self.ball,
+                    prev_ball_pos,
+                    self.cursor,
+                    relative_vel,
+                )
+                .is_some_and(|speed| speed >= self.config.cut_spring_cursor_speed)
     }
 
     /// Whether anything is visibly animating (used for idle frame pacing).
     pub fn is_active(&self) -> bool {
-        self.ball.grabbed
-            || self.spring.intersection.is_some()
-            || self.spring.entanglement.is_some()
-            || self.ball.spin.abs() >= self.config.sleep_spin
-            || !self.ball.asleep
-            || !self.particles.is_empty()
-            || !self.trail.is_empty()
+        self.ball_visible
+            && (self.ball.grabbed
+                || self.spring.intersection.is_some()
+                || self.spring.entanglement.is_some()
+                || self.ball.spin.abs() >= self.config.sleep_spin
+                || !self.ball.asleep
+                || !self.particles.is_empty()
+                || !self.trail.is_empty())
     }
 }
 

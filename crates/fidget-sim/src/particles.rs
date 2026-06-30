@@ -65,6 +65,10 @@ impl ParticleSystem {
         self.particles.iter()
     }
 
+    pub fn clear(&mut self) {
+        self.particles.clear();
+    }
+
     /// xorshift32 -> 0..1
     fn rand(&mut self) -> f32 {
         let mut x = self.rng;
